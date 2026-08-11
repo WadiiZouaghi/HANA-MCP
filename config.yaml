@@ -1,0 +1,208 @@
+# ============================================================
+# HANA MCP — Server Configuration
+# ============================================================
+
+hana:
+  address: localhost
+  port: 39041
+  user: MCP_MONITOR
+  password: HXEHana2
+
+
+# ============================================================
+# SECURITY
+# ============================================================
+security:
+  readonly: true
+
+  # Maximum rows any query may return (SELECT * is auto-limited to this).
+  max_rows: 1000
+
+  # Server-side statement timeout in seconds (optional).
+  timeout_seconds: 30
+
+  allowed_statements:
+    - SELECT
+    - WITH
+
+  blocked_keywords:
+    - INSERT
+    - UPDATE
+    - DELETE
+    - DROP
+    - ALTER
+    - CREATE
+    - TRUNCATE
+    - MERGE
+    - CALL
+    - GRANT
+    - REVOKE
+
+  # Optional allow-lists for object access (empty = allow all).
+  allowed_schemas: []
+  allowed_views: []
+
+
+# ============================================================
+# MONITORING TOOLS
+#
+# Each tool becomes a dynamic MCP tool named `hana_<name>`.
+# Keys: description, category, icon, severity, query
+# ============================================================
+monitoring:
+
+  system_status:
+    description: "Overall SAP HANA database status and version"
+    category: "Resources"
+    icon: "database"
+    severity: "info"
+    query: |
+      SELECT
+        DATABASE_NAME,
+        VERSION,
+        CURRENT_USER
+      FROM SYS.M_DATABASE
+
+  services:
+    description: "Active HANA services and their ports"
+    category: "Resources"
+    icon: "services"
+    severity: "info"
+    query: |
+      SELECT
+        SERVICE_NAME,
+        HOST,
+        PORT,
+        ACTIVE_STATUS
+      FROM SYS.M_SERVICES
+      ORDER BY SERVICE_NAME, PORT
+
+  memory:
+    description: "Current HANA memory usage"
+    category: "Resources"
+    icon: "memory"
+    severity: "info"
+    query: |
+      SELECT
+        NAME,
+        VALUE
+      FROM SYS.M_MEMORY
+
+  cpu:
+    description: "HANA CPU utilization per host"
+    category: "Resources"
+    icon: "cpu"
+    severity: "info"
+    query: |
+      SELECT
+        HOST,
+        TOTAL_CPU_USER_TIME,
+        TOTAL_CPU_SYSTEM_TIME,
+        TOTAL_CPU_IDLE_TIME
+      FROM SYS.M_HOST_RESOURCE_UTILIZATION
+
+  disk:
+    description: "HANA disk and volume usage"
+    category: "Resources"
+    icon: "disk"
+    severity: "info"
+    query: |
+      SELECT *
+      FROM SYS.M_DISK_USAGE
+
+  connections:
+    description: "Active database connections"
+    category: "Resources"
+    icon: "connections"
+    severity: "info"
+    query: |
+      SELECT
+        COUNT(*) AS CONNECTIONS
+      FROM SYS.M_CONNECTIONS
+
+  replication:
+    description: "System replication status"
+    category: "High Availability"
+    icon: "replication"
+    severity: "warning"
+    query: |
+      SELECT *
+      FROM SYS.M_SERVICE_REPLICATION
+
+  backup_status:
+    description: "Recent backup catalog entries"
+    category: "Operations"
+    icon: "backup"
+    severity: "info"
+    query: |
+      SELECT
+        TOP 20
+        *
+      FROM SYS.M_BACKUP_CATALOG
+      ORDER BY SYS_START_TIME DESC
+
+  expensive_statements:
+    description: "Top expensive SQL statements"
+    category: "Performance"
+    icon: "expensive"
+    severity: "warning"
+    query: |
+      SELECT
+        TOP 20
+        START_TIME,
+        DB_USER,
+        DURATION_MICROSEC,
+        STATEMENT_STRING
+      FROM SYS.M_EXPENSIVE_STATEMENTS
+      ORDER BY START_TIME DESC
+
+  active_statements:
+    description: "Currently active SQL statements"
+    category: "Performance"
+    icon: "active"
+    severity: "info"
+    query: |
+      SELECT
+        CONNECTION_ID,
+        USER_NAME,
+        STATEMENT_TYPE,
+        STATEMENT_STRING
+      FROM SYS.M_ACTIVE_STATEMENTS
+
+  blocked_transactions:
+    description: "Blocked transactions / lock waits"
+    category: "Performance"
+    icon: "lock"
+    severity: "critical"
+    query: |
+      SELECT *
+      FROM SYS.M_BLOCKED_TRANSACTIONS
+
+  table_sizes:
+    description: "Largest HANA tables by memory"
+    category: "Storage"
+    icon: "table"
+    severity: "info"
+    query: |
+      SELECT
+        SCHEMA_NAME,
+        TABLE_NAME,
+        RECORD_COUNT,
+        MEMORY_SIZE_IN_TOTAL
+      FROM SYS.M_CS_TABLES
+      ORDER BY MEMORY_SIZE_IN_TOTAL DESC
+
+  trace_files:
+    description: "HANA trace files overview"
+    category: "Diagnostics"
+    icon: "trace"
+    severity: "info"
+    query: |
+      SELECT
+        HOST,
+        FILE_NAME,
+        FILE_SIZE,
+        USED_SIZE,
+        FILE_MTIME
+      FROM SYS.M_TRACEFILES
+      ORDER BY FILE_MTIME DESC
