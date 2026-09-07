@@ -1,0 +1,9 @@
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+
+[tool.ruff.lint]
+ignore = [
+    "BLE001",  # Blind exception — intentional for graceful degradation in monitoring tool
+    "S110",    # try-except-pass — intentional for best-effort operations
+]

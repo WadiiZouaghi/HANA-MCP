@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
-from typing import Any, Mapping
+from typing import Any
 
 
 def _rows(value: Any) -> list[Mapping[str, Any]]:
@@ -58,10 +59,18 @@ def transform_cpu_metrics(raw_metrics: Any) -> dict[str, Any]:
     system_time = sum(_number(row.get("TOTAL_CPU_SYSTEM_TIME")) for row in rows)
     idle_time = sum(_number(row.get("TOTAL_CPU_IDLE_TIME")) for row in rows)
     total_time = user_time + system_time + idle_time
-    usage_percent = ((user_time + system_time) / total_time * 100) if total_time else 0.0
+    usage_percent = (
+        ((user_time + system_time) / total_time * 100) if total_time else 0.0
+    )
     return {
         "usage_percent": _round_percent(usage_percent),
-        "chart": {"labels": ["Busy", "Idle"], "values": [_round_percent(usage_percent), _round_percent(100 - usage_percent)]},
+        "chart": {
+            "labels": ["Busy", "Idle"],
+            "values": [
+                _round_percent(usage_percent),
+                _round_percent(100 - usage_percent),
+            ],
+        },
     }
 
 

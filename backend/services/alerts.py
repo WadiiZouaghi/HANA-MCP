@@ -1,13 +1,10 @@
-import _pathsetup
-
 import sqlite3
 from contextlib import closing
+from datetime import UTC, datetime
 from pathlib import Path
-from datetime import datetime, timezone
 
-
+from backend import _pathsetup  # noqa: F401 (ensures project root is on sys.path)
 from engine import query_rows
-
 
 ALERT_DATABASE_PATH = Path(__file__).parent.parent / "data" / "alert_state.sqlite3"
 SQLITE_BUSY_TIMEOUT_MS = 30 * 1000
@@ -26,7 +23,10 @@ def _alert_connection():
 
 def _acknowledged_alerts():
     with closing(_alert_connection()) as connection:
-        return {row["alert_key"]: row["acknowledged_at"] for row in connection.execute("SELECT * FROM alert_acknowledgements")}
+        return {
+            row["alert_key"]: row["acknowledged_at"]
+            for row in connection.execute("SELECT * FROM alert_acknowledgements")
+        }
 
 
 def get_alerts():
@@ -38,25 +38,35 @@ def get_alerts():
 
     lock_count = locks.get("count", 0) if isinstance(locks, dict) else 0
     if lock_count:
-        alerts.append({
-            "id": "blocked-transactions",
-            "title": "Blocked transactions detected",
-            "description": f"{lock_count} transaction(s) are currently blocked.",
-            "severity": "critical" if lock_count >= 5 else "warning",
-            "acknowledged_at": acknowledgements.get("blocked-transactions"),
-        })
+        alerts.append(
+            {
+                "id": "blocked-transactions",
+                "title": "Blocked transactions detected",
+                "description": f"{lock_count} transaction(s) are currently blocked.",
+                "severity": "critical" if lock_count >= 5 else "warning",
+                "acknowledged_at": acknowledgements.get("blocked-transactions"),
+            }
+        )
 
     expensive_rows = expensive if isinstance(expensive, list) else []
     if expensive_rows:
-        alerts.append({
-            "id": "expensive-queries",
-            "title": "Expensive SQL statements detected",
-            "description": f"{len(expensive_rows)} recent expensive statement(s) require review.",
-            "severity": "warning",
-            "acknowledged_at": acknowledgements.get("expensive-queries"),
-        })
+        alerts.append(
+            {
+                "id": "expensive-queries",
+                "title": "Expensive SQL statements detected",
+                "description": f"{len(expensive_rows)} recent expensive statement(s) require review.",
+                "severity": "warning",
+                "acknowledged_at": acknowledgements.get("expensive-queries"),
+            }
+        )
 
-    return sorted(alerts, key=lambda item: (item["acknowledged_at"] is not None, item["severity"] != "critical"))
+    return sorted(
+        alerts,
+        key=lambda item: (
+            item["acknowledged_at"] is not None,
+            item["severity"] != "critical",
+        ),
+    )
 
 
 def acknowledge_alert(alert_id):
@@ -64,12 +74,13 @@ def acknowledge_alert(alert_id):
     valid_ids = {alert["id"] for alert in get_alerts()}
     if alert_id not in valid_ids:
         raise ValueError("Alert not found or no longer active")
-    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    timestamp = datetime.now(UTC).isoformat(timespec="seconds")
     with _alert_connection() as connection:
-        connection.execute("INSERT OR REPLACE INTO alert_acknowledgements (alert_key, acknowledged_at, note) VALUES (?, ?, ?)", (alert_id, timestamp, ""))
+        connection.execute(
+            "INSERT OR REPLACE INTO alert_acknowledgements (alert_key, acknowledged_at, note) VALUES (?, ?, ?)",
+            (alert_id, timestamp, ""),
+        )
     return {"id": alert_id, "acknowledged_at": timestamp}
-
-
 
 
 def get_locks_alerts():
@@ -81,18 +92,10 @@ def get_locks_alerts():
 
     try:
         locks = query_rows(query)
-        return {
-            "count": len(locks),
-            "data": locks
-        }
+        return {"count": len(locks), "data": locks}
 
     except Exception as error:
-        return {
-            "error": str(error)
-        }
-
-
-
+        return {"error": str(error)}
 
 
 def get_expensive_queries():
@@ -109,6 +112,4 @@ def get_expensive_queries():
         return query_rows(query)
 
     except Exception as error:
-        return {
-            "error": str(error)
-        }
+        return {"error": str(error)}

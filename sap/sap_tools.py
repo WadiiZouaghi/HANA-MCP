@@ -1,18 +1,15 @@
 """MCP tool wrappers for the SAP diagnostic SQL library."""
 
-from typing import Optional
-
-from .sap_search import (
-    search_sap,
-    search_sap_by_note,
-    search_sap_by_component,
-    search_sap_by_table,
-    list_sap_library,
-)
-
 from .sap_executor import (
     execute_sap_statement,
     explain_sap_statement,
+)
+from .sap_search import (
+    list_sap_library,
+    search_sap,
+    search_sap_by_component,
+    search_sap_by_note,
+    search_sap_by_table,
 )
 
 
@@ -41,7 +38,7 @@ def hana_list_sap_library(limit: int = 50) -> list:
     return list_sap_library(limit)
 
 
-def hana_execute_sap_statement(name: str, parameters: Optional[dict] = None) -> dict:
+def hana_execute_sap_statement(name: str, parameters: dict | None = None) -> dict:
     """Execute an SAP diagnostic SQL statement from the library."""
     return execute_sap_statement(name)
 

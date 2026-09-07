@@ -3,7 +3,6 @@
 import json
 from pathlib import Path
 
-
 INDEX_FILE = Path(__file__).parent / "sap_index.json"
 
 
@@ -14,13 +13,15 @@ def _load_index() -> dict:
 
 def _searchable(item: dict) -> str:
     """Build a lower-cased searchable blob for an index entry."""
-    return " ".join([
-        str(item.get("name", "")),
-        str(item.get("description", "")),
-        str(item.get("tables", "")),
-        str(item.get("source", "")),
-        str(item.get("parameters", "")),
-    ]).lower()
+    return " ".join(
+        [
+            str(item.get("name", "")),
+            str(item.get("description", "")),
+            str(item.get("tables", "")),
+            str(item.get("source", "")),
+            str(item.get("parameters", "")),
+        ]
+    ).lower()
 
 
 def _to_result(item: dict) -> dict:

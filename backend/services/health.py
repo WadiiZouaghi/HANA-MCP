@@ -1,5 +1,4 @@
-import _pathsetup  # noqa: F401  (ensures project root is on sys.path)
-
+from backend import _pathsetup  # noqa: F401 (ensures project root is on sys.path)
 from engine import query_rows
 
 
@@ -17,7 +16,6 @@ def get_services_status():
     return query_rows(query)
 
 
-
 def get_replication_status():
 
     query = """
@@ -29,10 +27,7 @@ def get_replication_status():
         return query_rows(query)
 
     except Exception as error:
-        return {
-            "error": str(error)
-        }
-
+        return {"error": str(error)}
 
 
 def get_backup_status():
@@ -47,6 +42,4 @@ def get_backup_status():
         return query_rows(query)
 
     except Exception as error:
-        return {
-            "error": str(error)
-        }
+        return {"error": str(error)}

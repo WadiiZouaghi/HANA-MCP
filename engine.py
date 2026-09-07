@@ -18,8 +18,7 @@ from pathlib import Path
 import yaml
 from hdbcli import dbapi
 
-from logging_config import log_sql, log_error
-
+from logging_config import log_error, log_sql
 
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
@@ -29,6 +28,7 @@ _CONFIG = None
 # =====================================================
 # CONFIGURATION
 # =====================================================
+
 
 def load_config():
     global _CONFIG
@@ -52,13 +52,11 @@ def get_connection():
             address=hana["address"],
             port=hana["port"],
             user=hana["user"],
-            password=hana["password"]
+            password=hana["password"],
         )
 
     except Exception as error:
-        raise RuntimeError(
-            f"HANA connection failed: {error}"
-        ) from error
+        raise RuntimeError(f"HANA connection failed: {error}") from error
 
 
 def get_max_rows() -> int:
@@ -78,6 +76,7 @@ def get_timeout_seconds() -> int | None:
 # SQL VALIDATION
 # =====================================================
 
+
 def validate_sql(sql):
     if not sql or not sql.strip():
         raise ValueError("SQL query is empty")
@@ -89,36 +88,20 @@ def validate_sql(sql):
 
     security = load_security()
 
-    allowed_statements = security.get(
-        "allowed_statements",
-        ["SELECT", "WITH"]
-    )
+    allowed_statements = security.get("allowed_statements", ["SELECT", "WITH"])
 
     if statement not in allowed_statements:
-        raise ValueError(
-            f"Statement {statement} is not allowed"
-        )
+        raise ValueError(f"Statement {statement} is not allowed")
 
     if ";" in query[:-1]:
-        raise ValueError(
-            "Multiple SQL statements are forbidden"
-        )
+        raise ValueError("Multiple SQL statements are forbidden")
 
     if security.get("readonly", True):
-
-        blocked = security.get(
-            "blocked_keywords",
-            []
-        )
+        blocked = security.get("blocked_keywords", [])
 
         for keyword in blocked:
-            if re.search(
-                rf"\b{keyword}\b",
-                upper
-            ):
-                raise ValueError(
-                    f"Read-only restriction: {keyword}"
-                )
+            if re.search(rf"\b{keyword}\b", upper):
+                raise ValueError(f"Read-only restriction: {keyword}")
 
 
 def apply_row_limit(sql: str, max_rows: int | None) -> str:
@@ -135,13 +118,15 @@ def apply_row_limit(sql: str, max_rows: int | None) -> str:
     if re.search(r"\bTOP\s+\d+", upper) or re.search(r"\bLIMIT\s+\d+", upper):
         return sql
 
-    if re.match(r"^\s*SELECT\s+\*\s", sql, re.IGNORECASE) or re.match(r"^\s*SELECT\s+\*$", sql, re.IGNORECASE):
+    if re.match(r"^\s*SELECT\s+\*\s", sql, re.IGNORECASE) or re.match(
+        r"^\s*SELECT\s+\*$", sql, re.IGNORECASE
+    ):
         return re.sub(
             r"^\s*SELECT\s+",
             f"SELECT TOP {int(max_rows)} ",
             sql,
             count=1,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
     return sql
@@ -164,20 +149,13 @@ def _apply_statement_timeout(cursor, timeout_seconds) -> None:
 # OBJECT EXTRACTION / VALIDATION
 # =====================================================
 
+
 def extract_objects(sql):
-    return re.findall(
-        r'\b(?:FROM|JOIN)\s+([A-Z0-9_\."]+)',
-        sql.upper()
-    )
+    return re.findall(r'\b(?:FROM|JOIN)\s+([A-Z0-9_\."]+)', sql.upper())
 
 
 def normalize_object(value):
-    return (
-        value
-        .replace('"', '')
-        .strip()
-        .upper()
-    )
+    return value.replace('"', "").strip().upper()
 
 
 def resolve_object_schema(cursor, name):
@@ -201,7 +179,7 @@ def resolve_object_schema(cursor, name):
         )
         WHERE OBJECT_NAME = ?
         """,
-        (name,)
+        (name,),
     )
     schemas = {row[0] for row in cursor.fetchall()}
     if len(schemas) == 1:
@@ -212,9 +190,9 @@ def resolve_object_schema(cursor, name):
 # Regex to locate FROM/JOIN object references (optionally schema-qualified).
 _OBJECT_REF_RE = re.compile(
     r'\b(?:FROM|JOIN)\s+((?:"[^"]+"\s*\.\s*"[^"]+"|'
-    r'[A-Z0-9_]+\.[A-Z0-9_]+)|'
-    r'[A-Z0-9_]+)',
-    re.IGNORECASE
+    r"[A-Z0-9_]+\.[A-Z0-9_]+)|"
+    r"[A-Z0-9_]+)",
+    re.IGNORECASE,
 )
 
 
@@ -224,15 +202,16 @@ def qualify_sql_objects(sql, cursor):
     Prevents HANA error 259 ("Could not find table/view X in schema <default>")
     when a query references a system statistics table without the schema prefix.
     """
+
     def replace(match):
         ref = match.group(1)
         if "." in ref:
             # Already schema-qualified; leave untouched.
             return match.group(0)
-        name = ref.replace('"', '').strip().upper()
+        name = ref.replace('"', "").strip().upper()
         schema = resolve_object_schema(cursor, name)
         if schema:
-            return f"{match.group(0)[:match.start(1) - match.start(0)]}{schema}.{name}"
+            return f"{match.group(0)[: match.start(1) - match.start(0)]}{schema}.{name}"
         return match.group(0)
 
     return _OBJECT_REF_RE.sub(replace, sql)
@@ -253,20 +232,10 @@ def object_exists(cursor, schema, name):
         WHERE VIEW_NAME = ?
         AND (? IS NULL OR SCHEMA_NAME = ?)
         """,
-        (
-            name,
-            schema,
-            schema,
-            name,
-            schema,
-            schema
-        )
+        (name, schema, schema, name, schema, schema),
     )
 
-    return any(
-        row[0] > 0
-        for row in cursor.fetchall()
-    )
+    return any(row[0] > 0 for row in cursor.fetchall())
 
 
 def validate_objects(cursor, sql):
@@ -284,19 +253,14 @@ def validate_objects(cursor, sql):
             schema = None
             name = parts[0]
 
-        if not object_exists(
-            cursor,
-            schema,
-            name
-        ):
-            raise ValueError(
-                f"Unknown HANA object: {obj}"
-            )
+        if not object_exists(cursor, schema, name):
+            raise ValueError(f"Unknown HANA object: {obj}")
 
 
 # =====================================================
 # QUERY EXECUTION
 # =====================================================
+
 
 def execute_query(
     sql: str,
@@ -335,7 +299,7 @@ def execute_query(
         # Enforce a server-side statement timeout when configured.
         _apply_statement_timeout(
             cursor,
-            timeout_seconds if timeout_seconds is not None else get_timeout_seconds()
+            timeout_seconds if timeout_seconds is not None else get_timeout_seconds(),
         )
 
         # Validate that referenced objects exist before touching HANA.
@@ -368,9 +332,7 @@ def execute_query(
 
     except Exception as error:
         log_error(tool, str(error))
-        raise RuntimeError(
-            f"HANA query failed: {error}"
-        ) from error
+        raise RuntimeError(f"HANA query failed: {error}") from error
 
     finally:
         execution_ms = round((time.perf_counter() - start) * 1000, 2)

@@ -5,7 +5,6 @@ from pathlib import Path
 
 from engine import execute_query
 
-
 INDEX_FILE = Path(__file__).parent / "sap_index.json"
 
 
@@ -15,10 +14,7 @@ def load_statement(name: str) -> str:
         index = json.load(file)
 
     for item in index.values():
-        searchable = (
-            str(item.get("name"))
-            + str(item.get("description"))
-        ).lower()
+        searchable = (str(item.get("name")) + str(item.get("description"))).lower()
 
         if name.lower() in searchable:
             return item["sql"]
@@ -35,7 +31,7 @@ def execute_sap_statement(name: str, parameters: dict | None = None) -> dict:
 
     return execute_query(
         sql,
-        tool=f"hana_execute_sap_statement",
+        tool="hana_execute_sap_statement",
     )
 
 

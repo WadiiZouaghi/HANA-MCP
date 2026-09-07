@@ -3,7 +3,7 @@ SAP HANA monitoring engine.
 
 Loads monitoring tools fully dynamically from ``config.yaml`` and executes
 them through the safe query engine. Each tool carries metadata (description,
-category, icon, severity) that is surfaced to Claude and the web UI.
+category, icon, severity) that is surfaced to the LLM (via MCP) and the web UI.
 """
 
 from pathlib import Path
@@ -11,7 +11,6 @@ from pathlib import Path
 import yaml
 
 from engine import execute_query
-
 
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
 

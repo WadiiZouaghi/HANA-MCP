@@ -5,8 +5,11 @@
 hana:
   address: localhost
   port: 39041
-  user: MCP_MONITOR
-  password: HXEHana2
+  user: SYSTEM
+  password: HXEHana1
+
+  # user: MCP_MONITOR
+  # password: HXEHana2
 
 
 # ============================================================
@@ -16,7 +19,7 @@ security:
   readonly: true
 
   # Maximum rows any query may return (SELECT * is auto-limited to this).
-  max_rows: 1000
+  max_rows: 100
 
   # Server-side statement timeout in seconds (optional).
   timeout_seconds: 30
@@ -78,7 +81,7 @@ monitoring:
       ORDER BY SERVICE_NAME, PORT
 
   memory:
-    description: "Current HANA memory usage"
+    description: "Semantic HANA memory metrics with pressure evaluation"
     category: "Resources"
     icon: "memory"
     severity: "info"
@@ -111,7 +114,7 @@ monitoring:
       FROM SYS.M_DISK_USAGE
 
   connections:
-    description: "Active database connections"
+    description: "Active database connection count only. Does NOT return user names or session details. Use hana_execute_query(SELECT USER_NAME FROM SYS.USERS) for user lists."
     category: "Resources"
     icon: "connections"
     severity: "info"
@@ -130,7 +133,7 @@ monitoring:
       FROM SYS.M_SERVICE_REPLICATION
 
   backup_status:
-    description: "Recent backup catalog entries"
+    description: "Recent backup catalog entries and backup history"
     category: "Operations"
     icon: "backup"
     severity: "info"
@@ -142,7 +145,7 @@ monitoring:
       ORDER BY SYS_START_TIME DESC
 
   expensive_statements:
-    description: "Top expensive SQL statements"
+    description: "Top expensive SQL statements by duration"
     category: "Performance"
     icon: "expensive"
     severity: "warning"
@@ -206,3 +209,39 @@ monitoring:
         FILE_MTIME
       FROM SYS.M_TRACEFILES
       ORDER BY FILE_MTIME DESC
+
+
+# ============================================================
+# LLM AGENT (optional, OFF by default)
+#
+# When `enabled: false` (default) the Web UI AI Chat keeps using the
+# existing keyword router and never contacts a model.
+#
+# Enable only to give the Web UI real tool-calling reasoning. Point
+# `base_url` at any OpenAI-compatible Chat Completions endpoint. The
+# zero-cost option is a local model such as Ollama:
+#     base_url: http://localhost:11434/v1   (no API key needed)
+# `api_key` may be a dummy value for local endpoints.
+#
+# IMPORTANT: For reliable tool-calling and reasoning, use a model with
+# at least 7B parameters. The 3B model is too small for this task.
+# Recommended free local models:
+#   - qwen2.5:7b
+#   - llama3.1:8b
+#   - mistral:7b
+#   - gemma2:9b
+#
+# Safety net: if the agent is enabled but the model is unreachable,
+# the Web UI automatically falls back to the keyword router, so it
+# keeps answering instead of erroring.
+# ============================================================
+llm:
+  enabled: true
+  provider: openai
+  base_url: http://172.17.64.1:11434/v1
+  model: llama3.1:8b
+  temperature: 0.2     
+  top_p: 0.85              
+  max_tokens: 600
+  max_tool_rounds: 2       
+  request_timeout: 120

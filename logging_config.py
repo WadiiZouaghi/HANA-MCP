@@ -8,10 +8,8 @@ Writes to:
 """
 
 import logging
-import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-
 
 LOGS_DIR = Path(__file__).parent / "logs"
 
@@ -21,15 +19,27 @@ def _ensure_logs_dir() -> Path:
     return LOGS_DIR
 
 
-def _handler(name: str, level: int = logging.INFO, max_bytes: int = 10 * 1024 * 1024, backup_count: int = 5) -> RotatingFileHandler:
+def _handler(
+    name: str,
+    level: int = logging.INFO,
+    max_bytes: int = 10 * 1024 * 1024,
+    backup_count: int = 5,
+) -> RotatingFileHandler:
     _ensure_logs_dir()
     path = LOGS_DIR / name
-    handler = RotatingFileHandler(str(path), maxBytes=max_bytes, backupCount=backup_count)
+    handler = RotatingFileHandler(
+        str(path), maxBytes=max_bytes, backupCount=backup_count
+    )
     handler.setLevel(level)
     return handler
 
 
-def _setup_logger(name: str, handler: RotatingFileHandler, level: int = logging.INFO, formatter: logging.Formatter | None = None) -> logging.Logger:
+def _setup_logger(
+    name: str,
+    handler: RotatingFileHandler,
+    level: int = logging.INFO,
+    formatter: logging.Formatter | None = None,
+) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(level)
     logger.propagate = False
@@ -73,7 +83,9 @@ error_logger = _setup_logger(
 )
 
 
-def log_sql(tool: str, sql: str, execution_ms: float, row_count: int, success: bool) -> None:
+def log_sql(
+    tool: str, sql: str, execution_ms: float, row_count: int, success: bool
+) -> None:
     """Log a single SQL query execution."""
     status = "OK" if success else "FAIL"
     sql_logger.info(
