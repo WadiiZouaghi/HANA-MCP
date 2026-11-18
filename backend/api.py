@@ -1,4 +1,5 @@
 import json
+import time
 
 from flask import (
     Blueprint,
@@ -8,13 +9,19 @@ from flask import (
 )
 from services.agent import ModelUnavailable, agent_enabled, run_agent, run_agent_events
 from services.alerts import (
+    acknowledge_alert,
     get_alerts,
     get_expensive_queries,
     get_locks_alerts,
 )
 from services.dashboard import get_dashboard
 from services.dashboard_metrics import build_dashboard_metrics
-from services.database import get_database_status
+from services.database import get_database_status, ping_database
+from services.execution_log import (
+    last_execution_by_tool,
+    list_executions,
+    record_execution,
+)
 from services.health import (
     get_backup_status,
     get_replication_status,
@@ -28,7 +35,9 @@ from services.metrics import (
     get_memory_metrics,
 )
 
-from tool_registry import TOOLS
+from services.system_info import get_system_info
+
+from tool_registry import TOOLS, tool_manifest
 
 api = Blueprint("api", __name__)
 
@@ -45,13 +54,79 @@ def execute_tool(name):
 
     tool = TOOLS[name]
     parameters = request.json or {}
+    # The UI labels where a call came from (overview, console, tools page...).
+    source = (request.headers.get("X-Source") or "api")[:24]
+    # Automatic background polls are not recorded as activity.
+    record = (
+        (lambda *args, **kwargs: None)
+        if request.headers.get("X-Background")
+        else record_execution
+    )
+    started = time.perf_counter()
 
     try:
         result = tool["function"](**parameters)
-        return jsonify(result)
-
     except Exception as error:
+        record(
+            name,
+            source,
+            (time.perf_counter() - started) * 1000,
+            ok=False,
+            error=str(error),
+            arguments=parameters,
+        )
         return jsonify({"error": str(error)}), 500
+
+    record(
+        name,
+        source,
+        (time.perf_counter() - started) * 1000,
+        ok=True,
+        arguments=parameters,
+        row_count=result.get("row_count") if isinstance(result, dict) else None,
+    )
+    return jsonify(result)
+
+
+@api.route("/tools")
+def list_tools():
+    """Describe every tool exposed by the MCP server (from the live registry)."""
+    latest = last_execution_by_tool()
+    tools = []
+    for item in tool_manifest():
+        last = latest.get(item["name"])
+        tools.append(
+            {
+                **item,
+                "read_only": True,
+                "last_execution": (
+                    {
+                        "status": last["status"],
+                        "timestamp": last["timestamp"],
+                        "duration_ms": last["duration_ms"],
+                    }
+                    if last
+                    else None
+                ),
+            }
+        )
+    return jsonify({"read_only": True, "count": len(tools), "tools": tools})
+
+
+@api.route("/executions")
+def executions():
+    """Tool executions recorded since the backend started (newest first)."""
+    try:
+        limit = int(request.args.get("limit", 500))
+    except ValueError:
+        return jsonify({"error": "limit must be an integer"}), 400
+    return jsonify({"executions": list_executions(limit)})
+
+
+@api.route("/system/info")
+def system_info():
+    """Connection, security, LLM and MCP runtime details (never secrets)."""
+    return jsonify(get_system_info())
 
 
 # =====================================
@@ -113,7 +188,9 @@ def chat_agent_stream():
                     payload = payload + b" " * (1024 - len(payload)) + b"\n"
                 yield payload
         except ModelUnavailable as error:
-            payload = (json.dumps({"error": str(error), "fallback": True}) + "\n").encode("utf-8")
+            payload = (
+                json.dumps({"error": str(error), "fallback": True}) + "\n"
+            ).encode("utf-8")
             if len(payload) < 1024:
                 payload = payload + b" " * (1024 - len(payload)) + b"\n"
             yield payload
@@ -191,6 +268,12 @@ def system_status():
     return jsonify(get_database_status())
 
 
+@api.route("/system/ping")
+def system_ping():
+    """Lightweight connectivity/config probe for UI and ops checks."""
+    return jsonify(ping_database())
+
+
 # =====================================
 # METRICS
 # =====================================
@@ -254,6 +337,19 @@ def expensive_queries():
 @api.route("/alerts")
 def alerts():
     return jsonify(get_alerts())
+
+
+@api.route("/alerts/<alert_id>/ack", methods=["POST"])
+def acknowledge_alert_route(alert_id):
+    body = request.json or {}
+    note = (body.get("note") or "").strip()
+    try:
+        result = acknowledge_alert(alert_id, note=note)
+        return jsonify({"ok": True, "alert": result, "alerts": get_alerts()})
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 404
+    except Exception as error:
+        return jsonify({"error": str(error)}), 500
 
 
 # =====================================

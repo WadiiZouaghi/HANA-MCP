@@ -35,7 +35,7 @@ HANA-MCP/
 ├── front/
 │   ├── index.html           # Single HTML entry point
 │   ├── css/
-│   │   └── style.css        # Main stylesheet (~1055 lines, Catppuccin Mocha dark-first)
+│   │   └── style.css        # Main stylesheet
 │   └── js/
 │       ├── app.js           # Core helpers, navigation, theme toggle (~240 lines)
 │       ├── dashboard.js     # Dashboard rendering + health check (~370 lines)

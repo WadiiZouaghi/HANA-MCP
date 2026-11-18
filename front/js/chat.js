@@ -1,11 +1,24 @@
 /* ---------- AI CHAT (two-pane) ---------- */
+console.log("[chat] HANA-MCP chat.js v9 loaded — stream abort guard on new chat");
 var CHAT_KEY = "hana_chat_conversations";
 var CHAT_SB_COLLAPSED = "hana_chat_sb_collapsed";
 var currentConvId = null;
 var activeConv = null; /* in-memory active conversation; guarantees continuity even if localStorage is unavailable */
 var busy = false;
+var currentFetchController = null;
+var streamAborted = false;
+var conversationToken = 0;
 var pickedSql = null; /* SQL chosen by chooseSteps for a specific object/bulk query */
 var agentEnabled = false; /* true when the LLM agent loop is configured server-side */
+
+function nextConversationToken() {
+  conversationToken += 1;
+  return conversationToken;
+}
+
+function isCurrentConversationOperation(token, convId) {
+  return token === conversationToken && currentConvId === convId;
+}
 
 /* ---------- conversation persistence ---------- */
 function loadConvs() {
@@ -15,7 +28,7 @@ function saveConvs(convs) {
   try { localStorage.setItem(CHAT_KEY, JSON.stringify(convs)); } catch (e) { }
 }
 function getConv(id) {
-  if (id && activeConv && activeConv.id === id) return activeConv;
+  if (id && currentConvId === id && activeConv && activeConv.id === id) return activeConv;
   return loadConvs().filter(function (c) { return c.id === id; })[0] || null;
 }
 function upsertConv(conv) {
@@ -32,7 +45,7 @@ function upsertConv(conv) {
     }
     saveConvs(convs);
   } catch (e) { }
-  activeConv = conv;
+  if (conv.id === currentConvId) activeConv = conv;
 }
 function newConv() {
   var conv = { id: "c" + Date.now() + Math.floor(Math.random() * 1000), title: "New chat", created: Date.now(), messages: [] };
@@ -111,6 +124,9 @@ function renderSidebar() {
 }
 function deleteConv(id) {
   if (!id) return;
+  if (currentConvId === id || (activeConv && activeConv.id === id)) {
+    abortActiveStream();
+  }
   var convs = loadConvs().filter(function (c) { return c.id !== id; });
   saveConvs(convs);
   if (activeConv && activeConv.id === id) activeConv = null;
@@ -147,6 +163,9 @@ if (confirmOk) confirmOk.addEventListener("click", function () {
 var chatClearAll = $("chat-clear-all");
 if (chatClearAll) chatClearAll.addEventListener("click", function () {
   showClearConfirm(function () {
+    abortActiveStream();
+    clearAttachment();
+    pickedSql = null;
     saveConvs([]);
     activeConv = null;
     currentConvId = null;
@@ -216,7 +235,23 @@ function updateConvHeader() {
   if (titleEl) titleEl.textContent = conv.title || "New chat";
   if (countEl) countEl.textContent = conv.messages.length + " message" + (conv.messages.length !== 1 ? "s" : "");
 }
+function abortActiveStream() {
+  nextConversationToken();
+  if (currentFetchController) {
+    try { currentFetchController.abort(); } catch (e) { }
+    currentFetchController = null;
+  }
+  streamAborted = true;
+  busy = false;
+  clearPromptLoading();
+  var sendBtn = $("chat-send");
+  if (sendBtn) { sendBtn.disabled = false; sendBtn.classList.remove("is-busy"); }
+}
+
 function newChat() {
+  abortActiveStream();
+  clearAttachment();
+  pickedSql = null;
   newConv();
   $("chat-thread-inner").innerHTML = ""; // clear stale messages from the previous conversation
   showWelcome();
@@ -237,15 +272,9 @@ function renderThread(conv) {
     if (m.role === "user") {
       appendUserMsg(m.text, false, m.attachment);
     } else if (m.model) {
-      var agentDiv = appendAgentMsg(m, false);
-      if (m.steps && m.steps.length) {
-        renderResultGrids(agentGridResults(m.steps), agentDiv.querySelector(".chat-results"));
-      }
+      appendAgentMsg(m, false);
     } else {
-      var assistantDiv = appendAssistantMsg(m, false);
-      if (m.steps && m.steps.length) {
-        renderResultGrids(m.steps, assistantDiv.querySelector(".chat-results"));
-      }
+      appendAssistantMsg(m, false);
     }
   });
   showThread();
@@ -253,7 +282,7 @@ function renderThread(conv) {
   thread.scrollTop = thread.scrollHeight;
 }
 
-function appendUserMsg(text, persist, attachment) {
+function appendUserMsg(text, persist, attachment, convId) {
   var inner = $("chat-thread-inner");
   var div = document.createElement("div");
   div.className = "chat-msg chat-msg--user";
@@ -267,7 +296,7 @@ function appendUserMsg(text, persist, attachment) {
   var thread = $("chat-thread");
   thread.scrollTop = thread.scrollHeight;
   if (persist) {
-    var conv = getConv(currentConvId);
+    var conv = getConv(convId || currentConvId);
     if (conv) {
       conv.title = conv.messages.length ? conv.title : (text.slice(0, 40) + (text.length > 40 ? "…" : ""));
       conv.messages.push({ role: "user", text: text, attachment: attachment || null });
@@ -379,33 +408,15 @@ function appendAssistantMsg(m, persist) {
     '<div class="assistant-summary">' + renderAgentHTML(m.summary || "") + "</div>" +
     renderRelatedSuggestions(m.steps) +
     '<div class="chat-msg-actions">' +
-    '<button class="chat-msg-action chat-msg-action--primary" data-act="rerun">↻ Re-run</button>' +
-    '<button class="chat-msg-action" data-act="copy">📋 Copy</button>' +
-    '<button class="chat-msg-action agent-action--tertiary" data-act="docs">📚 Docs</button>' +
+    '<button class="chat-msg-action chat-msg-action--copy" data-act="copy" title="Copy response">📋</button>' +
     "</div></div>";
-  inner.appendChild(div);
+   inner.appendChild(div);
 
-  div.querySelector('[data-act="rerun"]').addEventListener("click", function () {
-    if (busy) return;
-    busy = true;
-    runSteps(m.steps || [], div, {})
-      .then(function () { busy = false; clearPromptLoading(); })
-      .catch(function () { busy = false; clearPromptLoading(); });
-  });
-  div.querySelector('[data-act="copy"]').addEventListener("click", function () {
-    var txt = m.summary || "";
-    if (navigator.clipboard) navigator.clipboard.writeText(txt).catch(function () { });
-  });
-  var docsBtn = div.querySelector('[data-act="docs"]');
-  if (docsBtn) {
-    docsBtn.addEventListener("click", function () {
-      var toolName = (m.steps && m.steps.length && m.steps[0].name) || "";
-      var url = "https://help.sap.com/viewer/";
-      if (toolName) url += "?search=" + encodeURIComponent(toolName.replace(/^hana_/, ""));
-      window.open(url, "_blank");
-    });
-  }
-  var relatedBtns = div.querySelectorAll(".chat-related-btn");
+   div.querySelector('[data-act="copy"]').addEventListener("click", function () {
+     var txt = m.summary || "";
+     if (navigator.clipboard) navigator.clipboard.writeText(txt).catch(function () { });
+   });
+   var relatedBtns = div.querySelectorAll(".chat-related-btn");
   relatedBtns.forEach(function (btn) {
     btn.addEventListener("click", function () {
       if (busy) return;
@@ -432,19 +443,25 @@ function convLastUser() {
 /* ---------- start a thread ---------- */
 function startThread(text, steps) {
   if (busy) return;
+  var operationToken = nextConversationToken();
   busy = true;
   $("chat-send").disabled = true;
   $("chat-send").classList.add("is-busy");
-  var conv = activeConv || getConv(currentConvId) || newConv();
-  currentConvId = conv.id;
+  var conv = getConv(currentConvId) || activeConv || newConv();
+  var convId = conv.id;
+  currentConvId = convId;
   activeConv = conv;
   showThread();
   appendUserMsg(text, true);
   var aiDiv = appendAssistantMsg({ steps: steps, summary: '<span style="color:var(--text3)">Thinking…</span>' }, false);
-  runSteps(steps, aiDiv, { userText: text })
+  runSteps(steps, aiDiv, {
+    userText: text,
+    isCurrent: function () { return isCurrentConversationOperation(operationToken, convId); }
+  })
     .then(function (summary) {
+      if (!isCurrentConversationOperation(operationToken, convId)) return;
       var m = { role: "assistant", steps: steps, summary: summary };
-      var conv2 = getConv(currentConvId);
+      var conv2 = getConv(convId);
       if (conv2) { conv2.messages.push(m); upsertConv(conv2); renderSidebar(); updateConvHeader(); }
       var thread = $("chat-thread");
       if (thread) thread.scrollTop = thread.scrollHeight;
@@ -453,7 +470,18 @@ function startThread(text, steps) {
       $("chat-send").disabled = false;
       $("chat-send").classList.remove("is-busy");
     })
-    .catch(function () { busy = false; clearPromptLoading(); $("chat-send").disabled = false; $("chat-send").classList.remove("is-busy"); });
+    .catch(function (err) {
+      if (!isCurrentConversationOperation(operationToken, convId)) return;
+      busy = false;
+      clearPromptLoading();
+      $("chat-send").disabled = false;
+      $("chat-send").classList.remove("is-busy");
+      var summaryEl2 = aiDiv.querySelector(".assistant-summary");
+      if (summaryEl2) {
+        summaryEl2.innerHTML = '<span style="color:var(--red)">Error: ' + esc(err && err.message || String(err)) + '</span>';
+      }
+      console.error("startThread runSteps error:", err);
+    });
 }
 
 function userAsk(text, nullArg) { startThread(text, chooseSteps(text)); }
@@ -517,16 +545,13 @@ function renderAgentHTML(summary) {
 
 /* ---------- real agent loop (optional, server-configured) ---------- */
 function dispatch(text) {
+  if (!text || !text.trim()) return;
   var steps = chooseSteps(text);
   if (steps && steps.length && (steps[0] === "__greet__" || steps[0] === "__unknown__")) {
     startThread(text, steps);
     return;
   }
-  if (agentEnabled || pendingAttachment) {
-    streamAgentThread(text);
-  } else {
-    startThread(text, steps);
-  }
+  streamAgentThread(text);
 }
 
 function agentGridResults(steps) {
@@ -545,51 +570,26 @@ function appendAgentMsg(result, persist) {
   var inner = $("chat-thread-inner");
   var div = document.createElement("div");
   div.className = "chat-msg chat-msg--ai";
+  var reasoningHTML = "";
+  if (result.reasoning) {
+    reasoningHTML = '<details class="chat-reasoning"><summary>Thought</summary><div class="chat-reasoning-body">' + esc(result.reasoning) + '</div></details>';
+  }
   div.innerHTML = '<div class="chat-msg-avatar">✦</div>' +
     '<div class="chat-msg-body">' +
     '<div class="chat-results"></div>' +
-    '<div class="assistant-summary">' + renderAgentHTML(result.summary || "") + "</div>" +
+    reasoningHTML +
+    '<div class="assistant-summary">' + renderAgentHTML(ensureUsableSummary(result.summary || "", result.steps || [], result.summary_source)) + "</div>" +
     renderRelatedSuggestions(result.steps) +
     '<div class="chat-msg-actions">' +
-    '<button class="chat-msg-action chat-msg-action--primary" data-act="rerun">↻ Re-run</button>' +
-    '<button class="chat-msg-action" data-act="copy">📋 Copy</button>' +
-    '<button class="chat-msg-action agent-action--tertiary" data-act="docs">📚 Docs</button>' +
+    '<button class="chat-msg-action chat-msg-action--copy" data-act="copy" title="Copy response">📋</button>' +
     "</div></div>";
-  inner.appendChild(div);
+   inner.appendChild(div);
 
-  div.querySelector('[data-act="rerun"]').addEventListener("click", function () {
-    if (busy) return;
-    busy = true;
-    var prompt = convLastUser();
-    var convR = getConv(currentConvId);
-    var historyR = (convR ? convR.messages : []).map(function (m) {
-      return { role: m.role, text: m.text || m.summary || "", attachment: m.attachment || null };
-    });
-    api("/api/chat/agent", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: prompt, history: historyR }) })
-      .then(function (res) {
-        if (!res.error) {
-          div.querySelector(".assistant-summary").innerHTML = renderAgentHTML(res.summary || "");
-          var rg = div.querySelector(".chat-results"); rg.innerHTML = "";
-          renderResultGrids(agentGridResults(res.steps || []), rg);
-        }
-      })
-      .catch(function () { })
-      .then(function () { busy = false; clearPromptLoading(); });
-  });
-  div.querySelector('[data-act="copy"]').addEventListener("click", function () {
-    var txt = result.summary || "";
-    if (navigator.clipboard) navigator.clipboard.writeText(txt).catch(function () { });
-  });
-  var docsBtn = div.querySelector('[data-act="docs"]');
-  if (docsBtn) {
-    docsBtn.addEventListener("click", function () {
-      var toolName = (result.steps && result.steps.length && result.steps[0].name) || "";
-      var url = "https://help.sap.com/viewer/";
-      if (toolName) url += "?search=" + encodeURIComponent(toolName.replace(/^hana_/, ""));
-      window.open(url, "_blank");
-    });
-  }
-  var relatedBtns = div.querySelectorAll(".chat-related-btn");
+   div.querySelector('[data-act="copy"]').addEventListener("click", function () {
+     var txt = result.summary || "";
+     if (navigator.clipboard) navigator.clipboard.writeText(txt).catch(function () { });
+   });
+   var relatedBtns = div.querySelectorAll(".chat-related-btn");
   relatedBtns.forEach(function (btn) {
     btn.addEventListener("click", function () {
       if (busy) return;
@@ -605,89 +605,16 @@ function appendAgentMsg(result, persist) {
   return div;
 }
 
-/* Drive the conversation through the server-side agent loop, falling back
-   to the keyword router if the model is unreachable. */
-function startAgentThread(text) {
-  if (busy) return;
-  busy = true;
-  $("chat-send").disabled = true;
-  $("chat-send").classList.add("is-busy");
-  var conv = activeConv || getConv(currentConvId) || newConv();
-  currentConvId = conv.id;
-  activeConv = conv;
-  var history = conv.messages.map(function (m) {
-    var entry = { role: m.role, attachment: m.attachment || null };
-
-    if (m.role === "user") {
-      entry.text = m.text || "";
-    } else if (m.role === "assistant") {
-      entry.text = m.summary || "";
-      // CRITICAL: Pass full tool steps so agent sees what tools returned
-      if (m.steps && m.steps.length) {
-        entry.steps = m.steps;
-      }
-    }
-
-    return entry;
-  });
-
-  showThread();
-  var attachment = pendingAttachment;
-  pendingAttachment = null;
-  clearAttachment();
-  appendUserMsg(text, false, attachment);
-  var payload = { text: text, history: history };
-  if (attachment) payload.attachment = attachment;
-  var agentResult = { summary: '<span class="chat-streaming-cursor">Thinking<span class="dot"></span><span class="dot"></span><span class="dot"></span></span>', steps: [] };
-  var aiDiv = appendAgentMsg(agentResult, false);
-  api("/api/chat/agent", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
-    .then(function (res) {
-      if (res.fallback) {
-        var inner = $("chat-thread-inner");
-        var kids = inner.children;
-        inner.removeChild(kids[kids.length - 1]);
-        inner.removeChild(kids[kids.length - 1]);
-        busy = false;
-        clearPromptLoading();
-        $("chat-send").disabled = false;
-        $("chat-send").classList.remove("is-busy");
-        startThread(text, chooseSteps(text));
-        return;
-      }
-      if (res.error) {
-        aiDiv.querySelector(".assistant-summary").innerHTML = "**Agent error:** " + esc(res.error);
-        agentResult.summary = "**Agent error:** " + esc(res.error);
-      } else {
-        aiDiv.querySelector(".assistant-summary").innerHTML = renderAgentHTML(res.summary || "");
-        agentResult.summary = res.summary || "";
-        renderResultGrids(agentGridResults(res.steps || []), aiDiv.querySelector(".chat-results"));
-        var c2 = getConv(currentConvId);
-        if (c2) {
-          c2.messages.push({ role: "user", text: text, attachment: attachment || null });
-          c2.messages.push({ role: "assistant", summary: res.summary, steps: res.steps, model: res.model });
-          upsertConv(c2); renderSidebar(); updateConvHeader();
-        }
-      }
-    })
-    .catch(function (e) {
-      aiDiv.querySelector(".assistant-summary").innerHTML = "**Agent error:** " + esc(e.message || String(e));
-    })
-    .then(function () {
-      busy = false;
-      clearPromptLoading();
-      $("chat-send").disabled = false;
-      $("chat-send").classList.remove("is-busy");
-    });
-}
-
 /* Stream agent events for progressive UI updates. */
 function streamAgentThread(text) {
   if (busy) return;
+  var operationToken = nextConversationToken();
   busy = true;
   $("chat-send").disabled = true;
   $("chat-send").classList.add("is-busy");
-  var conv = activeConv || getConv(currentConvId) || newConv();
-  currentConvId = conv.id;
+  var conv = getConv(currentConvId) || activeConv || newConv();
+  var convId = conv.id;
+  currentConvId = convId;
   activeConv = conv;
   var history = conv.messages.map(function (m) {
     var entry = { role: m.role, attachment: m.attachment || null };
@@ -717,23 +644,52 @@ function streamAgentThread(text) {
   var aiDiv = appendAgentMsg(agentResult, false);
   var summaryEl = aiDiv.querySelector(".assistant-summary");
   var resultsEl = aiDiv.querySelector(".chat-results");
-  summaryEl.innerHTML = '<div class="chat-streaming-cursor">Analyzing request<span class="dot"></span><span class="dot"></span><span class="dot"></span></div>';
+  summaryEl.innerHTML = '<div class="chat-streaming-cursor"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div><a class="chat-cancel" href="#">Cancel</a>';
+
+  var fetchController = new AbortController();
+  currentFetchController = fetchController;
+  streamAborted = false;
+  var cancelLink = summaryEl.querySelector(".chat-cancel");
+  if (cancelLink) {
+    cancelLink.addEventListener("click", function (e) {
+      e.preventDefault();
+      if (!aborted) {
+        fetchController.abort();
+        summaryEl.innerHTML = '<span style="color:var(--text3)">Cancelled.</span>';
+        cleanup();
+      }
+    });
+  }
 
   var fullText = "";
+  var fullReasoning = "";
   var streamSteps = [];
   var chipMap = {};
   var toolset = null;
   var aborted = false;
+  var reasoningEl = null;
+
+  function isCurrentOperation() {
+    return isCurrentConversationOperation(operationToken, convId);
+  }
 
   function cleanup() {
+    if (!isCurrentOperation()) return;
     aborted = true;
+    streamAborted = true;
     busy = false;
+    clearTimeout(streamTimer);
+    if (currentFetchController === fetchController) currentFetchController = null;
     clearPromptLoading();
     $("chat-send").disabled = false;
     $("chat-send").classList.remove("is-busy");
   }
 
   function fallback() {
+    if (!isCurrentOperation() || streamAborted) {
+      cleanup();
+      return;
+    }
     var inner = $("chat-thread-inner");
     var kids = inner.children;
     if (kids.length >= 2) {
@@ -744,14 +700,19 @@ function streamAgentThread(text) {
     startThread(text, chooseSteps(text));
   }
 
+  var STREAM_TIMEOUT = 120000;
   var streamTimer = setTimeout(function () {
-    if (!aborted) fallback();
-  }, 30000);
+    if (!aborted && !streamAborted) {
+      summaryEl.innerHTML = '<span style="color:var(--text3)">Model is taking too long. Switching to offline mode…</span>';
+      fallback();
+    }
+  }, STREAM_TIMEOUT);
 
   fetch("/api/chat/agent/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
+    signal: fetchController.signal
   }).then(function (res) {
     if (!res.ok) throw new Error("Streaming endpoint unavailable");
     var reader = res.body.getReader();
@@ -761,7 +722,7 @@ function streamAgentThread(text) {
     function read() {
       return reader.read().then(function (result) {
         if (result.done) {
-          if (!aborted) cleanup();
+          if (!aborted && !streamAborted) cleanup();
           return;
         }
         buffer += decoder.decode(result.value, { stream: true });
@@ -773,14 +734,14 @@ function streamAgentThread(text) {
           try {
             var event = JSON.parse(line);
             if (event.type === "error") {
+              if (streamAborted) return;
               if (event.fallback) fallback();
               else {
                 summaryEl.innerHTML = "**Agent error:** " + esc(event.error || "Unknown error");
                 cleanup();
               }
             } else if (event.type === "thinking") {
-              var msg = event.stage === "calling_model" ? "Calling model (round " + (event.round || 1) + ")" : "Preparing request";
-              summaryEl.innerHTML = '<div class="chat-streaming-cursor">' + esc(msg) + '<span class="dot"></span><span class="dot"></span><span class="dot"></span></div>';
+              summaryEl.innerHTML = '<div class="chat-streaming-cursor"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>';
             } else if (event.type === "tool_start") {
               if (!toolset) {
                 toolset = document.createElement("div");
@@ -811,19 +772,42 @@ function streamAgentThread(text) {
                   break;
                 }
               }
+            } else if (event.type === "reasoning") {
+              if (!aiDiv.isConnected) return;
+              fullReasoning += event.text;
+              if (!reasoningEl) {
+                reasoningEl = document.createElement("details");
+                reasoningEl.className = "chat-reasoning";
+                reasoningEl.open = true;
+                reasoningEl.innerHTML = '<summary>Thought</summary><div class="chat-reasoning-body"></div>';
+                var body = aiDiv.querySelector(".chat-msg-body");
+                var narrative = body.querySelector(".chat-narrative");
+                if (narrative) body.insertBefore(reasoningEl, narrative.nextSibling);
+                else body.insertBefore(reasoningEl, summaryEl);
+              }
+              reasoningEl.querySelector(".chat-reasoning-body").textContent = fullReasoning;
             } else if (event.type === "token") {
+              if (!aiDiv.isConnected) return;
               fullText += event.text;
               summaryEl.innerHTML = renderAgentHTML(fullText) + '<span class="chat-streaming-cursor--inline"><span class="cursor-blink">▊</span></span>';
             } else if (event.type === "done") {
+              if (aborted || streamAborted) return;
+              if (!aiDiv.isConnected) { return; }
               var finalSummary = event.summary || fullText;
-              summaryEl.innerHTML = renderAgentHTML(finalSummary);
-              if (resultsEl && event.steps && event.steps.length) {
-                renderResultGrids(event.steps.filter(function(s) { return !s.error && s.rows && s.rows.length; }), resultsEl);
+              var finalReasoning = event.reasoning || fullReasoning;
+              var finalSteps = event.steps || streamSteps;
+              finalSummary = ensureUsableSummary(finalSummary, finalSteps, event.summary_source);
+               summaryEl.innerHTML = renderAgentHTML(finalSummary);
+              if (reasoningEl) {
+                reasoningEl.querySelector(".chat-reasoning-body").textContent = finalReasoning;
+                reasoningEl.open = false;
               }
               var c2 = getConv(currentConvId);
               if (c2) {
                 c2.messages.push({ role: "user", text: text, attachment: attachment || null });
-                c2.messages.push({ role: "assistant", summary: finalSummary, steps: event.steps || streamSteps, model: event.model });
+                var assistantMsg = { role: "assistant", summary: finalSummary, steps: event.steps || streamSteps, model: event.model };
+                if (finalReasoning) assistantMsg.reasoning = finalReasoning;
+                c2.messages.push(assistantMsg);
                 upsertConv(c2); renderSidebar(); updateConvHeader();
               }
             }
@@ -831,15 +815,19 @@ function streamAgentThread(text) {
             // ignore parse errors
           }
         });
-        if (!result.done && !aborted) return read();
+        if (!result.done && !aborted && !streamAborted) return read();
       });
     }
     return read();
   }).catch(function (e) {
-    if (!aborted) fallback();
+    if (!aborted && !streamAborted) {
+      console.error("Agent stream error:", e);
+      summaryEl.innerHTML = '<span style="color:var(--red)">Agent unavailable: ' + esc(e && e.message || String(e)) + '</span>';
+      fallback();
+    }
   }).then(function () {
     clearTimeout(streamTimer);
-    if (!aborted) cleanup();
+    if (!aborted && !streamAborted) cleanup();
   });
 }
 
@@ -871,18 +859,11 @@ var TOOL_NARRATIVE = {
   "hana_describe_table": "Describing a table"
 };
 function narrateTool(name) {
-  if (!name) return "Working on your request";
+  if (!name) return "";
   return TOOL_NARRATIVE[name] || ("Running " + name.replace(/^hana_/, "").replace(/_/g, " "));
 }
 function narrateRequest(userText, steps) {
-  if (!userText) return "Working on your request…";
-  var cleaned = userText.trim().replace(/\s+/g, " ");
-  if (!cleaned) return "Working on your request…";
-  var lower = cleaned.toLowerCase();
-  if (lower.endsWith("?") || /^(what|how|why|when|where|who|can|could|show|tell|list|find|check|get|is|are|do|does)\b/.test(lower)) {
-    return 'Looking into "' + cleaned + '"';
-  }
-  return 'Handling "' + cleaned + '"';
+  return "";
 }
 function createToolChip(toolset, name) {
   var wrap = document.createElement("div");
@@ -915,11 +896,13 @@ function runSteps(steps, aiDiv, opts) {
     if (!narrative) {
       narrative = document.createElement("div");
       narrative.className = "chat-narrative";
+      body.insertBefore(toolset, summary);
       body.insertBefore(narrative, toolset);
+    } else {
+      body.insertBefore(toolset, summary);
     }
     var userText = (opts && opts.userText) || convLastUser();
     narrative.textContent = narrateRequest(userText, steps);
-    body.insertBefore(toolset, summary);
     summary.innerHTML = '<div class="chat-streaming-cursor">Reading system state<span class="dot"></span><span class="dot"></span><span class="dot"></span></div>';
     var results = [];
     var idx = 0;
@@ -928,10 +911,8 @@ function runSteps(steps, aiDiv, opts) {
       if (idx >= steps.length) {
         var single = results.length === 1;
         var nm = single ? results[0].name : "";
-        var s = (single && nm !== "__greet__" && nm !== "__unknown__") ? buildFocusedSummary(results) : buildSummary(results);
+         var s = (single && nm !== "__greet__" && nm !== "__unknown__") ? buildFocusedSummary(results) : buildSummary(results);
         summary.innerHTML = renderAgentHTML(s);
-        var resultsEl = aiDiv.querySelector(".chat-results");
-        if (resultsEl) renderResultGrids(results, resultsEl);
         resolve(s);
         return;
       }
@@ -1050,7 +1031,38 @@ function fmtBytes2(b) {
   return b.toFixed(1) + " " + u[i];
 }
 
+/* Format structured data as collapsible raw result details. */
+function jsonBlock(data) {
+  var json = JSON.stringify(data, null, 2) || "";
+  return '<details class="chat-json-details"><summary>Raw result details</summary><pre><code>' + esc(json) + '</code></pre></details>';
+}
+
 /* Focused narrative for a single monitoring tool (memory / cpu / connections). */
+function isSyntheticSummary(text) {
+  if (!text) return true;
+  var t = String(text).trim();
+  if (!t) return true;
+  if (/^Results:\s*\*\*[^*]+\*\*\s+returned\s+\d+\s+row/i.test(t)) return true;
+  if (/^\*\*[^*]+\*\*\s+returned\s+\d+\s+row/i.test(t)) return true;
+  if (/^[A-Za-z_][A-Za-z0-9_]*\s+returned\s+\d+\s+row/i.test(t)) return true;
+  if (/returned\s+\d+\s+row\(s\)/i.test(t) && t.length < 200 && !/·/.test(t) && !/\*\*[^*]+\*\*\s*[—\-:]/i.test(t)) return true;
+  if (t.length < 40 && /returned\s+\d+\s+row/i.test(t)) return true;
+  return false;
+}
+function ensureUsableSummary(text, steps, source) {
+  /* A verified explanation written by the model is shown as is; the
+     client-built summary is only a fallback when there is none. */
+  if (source === "model" && text && text.replace(/\s/g, "").length > 20) return text;
+  var hasRows = steps && steps.length && steps.some(function (s) { return s.rows && s.rows.length; });
+  if (hasRows) {
+    try {
+      var rebuilt = steps.length === 1 ? buildFocusedSummary(steps) : buildSummary(steps);
+      if (rebuilt && rebuilt.length > 20) return rebuilt;
+    } catch (e) {
+    }
+  }
+  return text || "No results were returned.";
+}
 function buildFocusedSummary(results) {
   if (!results.length) return "No results were returned.";
   var r = results[0];
@@ -1059,7 +1071,7 @@ function buildFocusedSummary(results) {
     var pts = (r.res && r.res.points) || [];
     if (!pts.length) return "I don't have any metric history recorded yet. The dashboard snapshots the system every 30s, so ask again after it has been running a while.";
     var last = pts[pts.length - 1];
-    return "Over the last **" + (r.res.window_minutes) + "** min I have **" + pts.length + "** snapshot(s). Latest: CPU **" + Math.round(last.cpu_usage * 10) / 10 + "%**, memory **" + Math.round(last.memory_usage * 10) / 10 + "%**, connections **" + last.connections + "**.";
+    return jsonBlock({ window_minutes: r.res.window_minutes, snapshots: pts.length, latest: { cpu_usage: Math.round(last.cpu_usage * 10) / 10, memory_usage: Math.round(last.memory_usage * 10) / 10, connections: last.connections, captured_at: last.captured_at } }) + "\n\nOver the last **" + (r.res.window_minutes) + "** min I have **" + pts.length + "** snapshot(s). Latest: CPU **" + Math.round(last.cpu_usage * 10) / 10 + "%**, memory **" + Math.round(last.memory_usage * 10) / 10 + "%**, connections **" + last.connections + "**.";
   }
   if (r.name === "hana_compare_periods") {
     var cm = (r.res && r.res.metrics) || {};
@@ -1069,7 +1081,7 @@ function buildFocusedSummary(results) {
       var dp = d.delta_pct != null ? (d.delta_pct >= 0 ? " +" : " ") + d.delta_pct + "%" : " n/a";
       clines.push("- **" + k.replace(/_/g, " ") + "**: " + (d.recent_avg != null ? d.recent_avg : "?") + " vs " + (d.prior_avg != null ? d.prior_avg : "?") + " (" + dp + ")");
     });
-    return "Comparing the last **" + r.res.recent_minutes + "** min vs the **" + r.res.prior_minutes + "** min before:\n\n" + clines.join("\n");
+    return jsonBlock({ recent_minutes: r.res.recent_minutes, prior_minutes: r.res.prior_minutes, metrics: cm }) + "\n\nComparing the last **" + r.res.recent_minutes + "** min vs the **" + r.res.prior_minutes + "** min before:\n\n" + clines.join("\n");
   }
   if (r.name === "hana_detect_anomalies") {
     var an = (r.res && r.res.anomalies) || [];
@@ -1077,13 +1089,127 @@ function buildFocusedSummary(results) {
     var ahead = an.slice(0, 8).map(function (x) {
       return "- " + x.captured_at + " **" + x.metric + "** = " + x.value + " (mean " + x.mean + ", Δ" + x.deviation + ")";
     }).join("\n");
-    return "Found **" + an.length + "** anomalous point(s) in the last **" + r.res.window_minutes + "** min:\n\n" + ahead + (an.length > 8 ? "\n\n…and " + (an.length - 8) + " more." : "");
+    return jsonBlock({ window_minutes: r.res.window_minutes, threshold_std_devs: r.res.threshold_std_devs, anomaly_count: an.length, anomalies: an.slice(0, 8) }) + "\n\nFound **" + an.length + "** anomalous point(s) in the last **" + r.res.window_minutes + "** min:\n\n" + ahead + (an.length > 8 ? "\n\n…and " + (an.length - 8) + " more." : "");
   }
   if (r.name === "hana_health_check") {
-    return (r.res && r.res.summary) || "The health check completed, but did not return a summary.";
+    var hr = (r.res && r.res.checks) || {};
+    var findings = (r.res && r.res.findings) || [];
+    var health = (r.res && r.res.health) || "UNKNOWN";
+    var emoji = health === "HEALTHY" ? "✅" : health === "WARNING" ? "⚠️" : "🚨";
+    var lines = [];
+
+    var healthData = {
+      health: health,
+      checked_at: (r.res && r.res.checked_at) || null,
+      checks: {
+        system_status: hr.system_status || null,
+        services: hr.services || null,
+        memory: hr.memory || null,
+        cpu: hr.cpu || null,
+        disk: hr.disk || null,
+        connections: hr.connections || null,
+        blocked_transactions: hr.blocked_transactions || null,
+        backup_status: hr.backup_status || null,
+        replication: hr.replication || null,
+      },
+      findings: findings,
+    };
+    lines.push(jsonBlock(healthData));
+    lines.push("");
+    lines.push(emoji + " **Database is " + health + "**\n");
+    if (hr.services) {
+      var s = hr.services;
+      if (s.total) {
+        if (s.offline > 0) lines.push("**Services** — ⚠️ " + s.online + "/" + s.total + " online (" + s.offline + " down).");
+        else lines.push("**Services** — all **" + s.total + "** online.");
+      }
+    }
+    if (hr.memory) {
+      var m = hr.memory;
+      if (m.used_percent != null) {
+        var memText = "**Memory** — **" + m.used_percent + "%** used";
+        if (m.used_bytes) memText += " (" + fmtBytes2(m.used_bytes);
+        if (m.total_bytes) memText += " of " + fmtBytes2(m.total_bytes);
+        if (m.used_bytes) memText += ")";
+        lines.push(memText + ".");
+      }
+    }
+    if (hr.cpu) {
+      var c = hr.cpu;
+      if (c.used_percent != null) lines.push("**CPU** — about **" + c.used_percent + "%** utilization" + (c.hosts ? " across " + c.hosts + " host(s)" : "") + ".");
+    }
+    if (hr.disk) {
+      var d = hr.disk;
+      if (d.max_used_percent != null) {
+        if (d.max_used_percent >= 90) {
+          lines.push("**Disk** — 🚨 max volume at **" + d.max_used_percent + "%** used (nearly full).");
+        } else if (d.max_used_percent >= 80) {
+          lines.push("**Disk** — ⚠️ max volume at **" + d.max_used_percent + "%** used.");
+        } else {
+          lines.push("**Disk** — **" + d.max_used_percent + "%** used (max volume).");
+        }
+      }
+    }
+    if (hr.connections) {
+      var cn = hr.connections;
+      if (cn.count != null) lines.push("**Connections** — **" + cn.count + "** active right now.");
+    }
+    if (hr.blocked_transactions) {
+      var lk = hr.blocked_transactions;
+      if (lk.blocked_transactions > 0) lines.push("**Locks** — 🚨 **" + lk.blocked_transactions + "** blocked transaction(s).");
+      else lines.push("**Locks** — all clear, nothing blocked.");
+    }
+    if (hr.backup_status) {
+      var bk = hr.backup_status;
+      if (bk.status === "OK") lines.push("**Backups** — ✅ last backup completed successfully.");
+      else if (bk.status === "FAILED") lines.push("**Backups** — 🚨 last backup **FAILED**.");
+      else lines.push("**Backups** — ⚠️ " + (bk.status || bk.state || "unknown") + ".");
+    }
+    if (hr.replication) {
+      var rp = hr.replication;
+      if (rp.status === "OK") lines.push("**Replication** — ✅ active and healthy.");
+      else lines.push("**Replication** — " + (rp.status || rp.state || "not configured") + ".");
+    }
+    if (findings.length) {
+      lines.push("\n**Findings:**");
+      findings.forEach(function (f) {
+        var fs = String(f).toLowerCase();
+        var icon = fs.indexOf("critical") >= 0 ? "🚨" : fs.indexOf("warning") >= 0 ? "⚠️" : "ℹ️";
+        lines.push("- " + icon + " " + esc(f));
+      });
+    }
+    return lines.join("\n");
   }
   var rows = r.rows || [];
   if (!rows.length) return "That check returned no rows right now.";
+
+  if (r.name === "hana_disk") {
+    var diskData = rows.map(function (d) {
+      var name = d.USAGE_TYPE || d.VOLUME_ID || d.FILE_NAME || d.TYPE || "volume";
+      var usedB = num(d.USED_SIZE);
+      var totalB = num(d.FILE_SIZE) || num(d.TOTAL_SIZE) || num(d.SIZE) || num(d.ALLOCATED_SIZE);
+      return { name: name, used_bytes: usedB, used: usedB != null ? fmtBytes2(usedB) : null, total_bytes: totalB, total: totalB != null ? fmtBytes2(totalB) : null, used_percent: (usedB != null && totalB != null && totalB > 0) ? Math.round(usedB / totalB * 1000) / 10 : null };
+    }).filter(function (d) { return d.used_bytes != null && d.used_bytes >= 0 && d.total_bytes != null && d.total_bytes > 0; });
+    var diskLines = [];
+    var maxPct = 0;
+    var maxName = null;
+    rows.forEach(function (d) {
+      var name = d.USAGE_TYPE || d.VOLUME_ID || d.FILE_NAME || d.TYPE || "volume";
+      var usedB = num(d.USED_SIZE);
+      var totalB = num(d.FILE_SIZE) || num(d.TOTAL_SIZE) || num(d.SIZE) || num(d.ALLOCATED_SIZE);
+      if (usedB == null || usedB < 0 || totalB == null || totalB <= 0) return;
+      var pct = Math.round(usedB / totalB * 1000) / 10;
+      var icon = pct >= 95 ? "🚨" : pct >= 80 ? "⚠️" : "✅";
+      diskLines.push("- " + icon + " **" + esc(name) + "** — " + fmtBytes2(usedB) + " / " + fmtBytes2(totalB) + " (" + pct + "%)");
+      if (pct > maxPct) { maxPct = pct; maxName = name; }
+    });
+    if (!diskLines.length) return "No disk usage data available.";
+    var head = "Disk usage by volume:\n\n";
+    var diskJson = jsonBlock(diskData);
+    if (maxPct >= 95) return diskJson + "\n\n" + head + diskLines.join("\n") + "\n\n🚨 **" + esc(maxName) + "** is nearly full — consider cleanup or expansion.";
+    if (maxPct >= 80) return diskJson + "\n\n" + head + diskLines.join("\n") + "\n\n⚠️ Max volume **" + esc(maxName) + "** at " + maxPct + "% — worth watching.";
+    return diskJson + "\n\n" + head + diskLines.join("\n");
+  }
 
   if (r.name === "hana_memory") {
     var byName = {};
@@ -1102,8 +1228,10 @@ function buildFocusedSummary(results) {
     };
     var used = pickV(["used", "allocated"]);
     var limit = pickV(["allocation limit", "limit", "max", "total", "peak"]);
+    var memData = { used_bytes: used, used: used != null ? fmtBytes2(used) : null, total_bytes: limit, total: limit != null ? fmtBytes2(limit) : null, used_percent: (used != null && limit != null) ? Math.round(used / limit * 100) : null, raw: rows };
     var out = [];
-    out.push(used != null ? "You're currently using **" + fmtBytes2(used) + "** of memory." : "I couldn't read the current memory usage from the results.");
+    out.push("Memory usage:\n\n" + jsonBlock(memData) + "\n\n" +
+      (used != null ? "You're currently using **" + fmtBytes2(used) + "** of memory." : "I couldn't read the current memory usage from the results."));
     if (limit != null) out.push("The allocation limit is **" + fmtBytes2(limit) + "**.");
     var pct = (used != null && limit != null) ? Math.round(used / limit * 100) : null;
     if (pct != null) out.push(pct >= 85 ? "That's **" + pct + "%** — getting high, worth watching." : pct >= 70 ? "That's **" + pct + "%** — creeping up, but still okay for now." : "That's **" + pct + "%** — comfortably within normal range.");
@@ -1114,14 +1242,127 @@ function buildFocusedSummary(results) {
     var c = rows[0];
     var userT = num(c.TOTAL_CPU_USER_TIME) + num(c.TOTAL_CPU_SYSTEM_TIME);
     var totT = userT + num(c.TOTAL_CPU_IDLE_TIME);
-    var util = totT ? Math.round(userT / totT * 100) + "%" : "n/a";
-    return "CPU is running at about **" + util + "** on **" + (c.HOST || "the instance") + "**.";
+    var util = totT ? Math.round(userT / totT * 1000) / 10 : null;
+    var cpuData = { host: c.HOST || "unknown", user_time: num(c.TOTAL_CPU_USER_TIME), system_time: num(c.TOTAL_CPU_SYSTEM_TIME), idle_time: num(c.TOTAL_CPU_IDLE_TIME), total_busy_time: userT, total_idle_time: num(c.TOTAL_CPU_IDLE_TIME), utilization_percent: util, hosts: rows.length };
+    return jsonBlock(cpuData) + "\n\n" + "CPU is running at about **" + (util != null ? util + "%" : "n/a") + "** on **" + esc(c.HOST || "the instance") + "** across **" + rows.length + "** host(s).";
   }
 
   if (r.name === "hana_connections") {
     var conn = rows[0];
     var connVal = conn.CONNECTIONS != null ? conn.CONNECTIONS : rows.length;
-    return "You've got **" + connVal + "** active connection" + (connVal === 1 ? "" : "s") + " right now.";
+    var connData = { active_connections: connVal, sample_row: rows[0] || null };
+    return jsonBlock(connData) + "\n\n" + "You've got **" + connVal + "** active connection" + (connVal === 1 ? "" : "s") + " right now.";
+  }
+
+  if (r.name === "hana_services") {
+    if (!rows.length) return "No service rows returned.";
+    var ok = 0, down = 0;
+    rows.forEach(function (s) {
+      var st = String(s.ACTIVE_STATUS || s.STATUS || "").toLowerCase();
+      if (st === "yes" || st === "active" || st === "ok" || st === "running") ok++;
+      else down++;
+    });
+    var host = (rows[0].HOST || "the instance");
+    var svcNames = rows.map(function (s) { return s.SERVICE_NAME || s.NAME || "?"; });
+    var svcData = rows.map(function (s) { return { service: s.SERVICE_NAME || s.NAME || "?", host: s.HOST || host, port: s.PORT, status: s.ACTIVE_STATUS || s.STATUS || "UNKNOWN" }; });
+    if (down === 0) {
+      return jsonBlock(svcData) + "\n\n" + "✅ All **" + ok + "** services are running on **" + esc(host) + "** — " + svcNames.join(", ") + ".";
+    } else {
+      return jsonBlock(svcData) + "\n\n" + "⚠️ **" + ok + "/" + (ok + down) + "** services active on **" + esc(host) + "**. " + down + " down.";
+    }
+  }
+
+  if (r.name === "hana_blocked_transactions") {
+    if (!rows.length) return "✅ No blocked transactions — everything is flowing smoothly.";
+    var blkData = rows.slice(0, 10).map(function (x) {
+      var blocker = x.BLOCKING_TRANSACTION_NAME || x.BLOCKING_CONNECTION_ID || "?";
+      var blocked2 = x.TRANSACTION_NAME || x.CONNECTION_ID || "?";
+      return { blocked: blocked2, blocked_on: blocker, blocking_transaction: x.BLOCKING_TRANSACTION_NAME || null, blocking_connection: x.BLOCKING_CONNECTION_ID || null };
+    });
+    var blocked = rows.slice(0, 10).map(function (x) {
+      var blocker = x.BLOCKING_TRANSACTION_NAME || x.BLOCKING_CONNECTION_ID || "?";
+      var blocked2 = x.TRANSACTION_NAME || x.CONNECTION_ID || "?";
+      return "- **" + esc(blocked2) + "** waiting on **" + esc(blocker) + "**";
+    }).join("\n");
+    return jsonBlock(blkData) + "\n\n" + "⚠️ **" + rows.length + "** blocked transaction(s):\n\n" + blocked + (rows.length > 10 ? "\n\n_…and " + (rows.length - 10) + " more._" : "");
+  }
+
+  if (r.name === "hana_expensive_statements") {
+    if (!rows.length) return "✅ No expensive statements recorded recently.";
+    var expData = rows.slice(0, 5).map(function (x) {
+      return { user: x.DB_USER || "unknown", duration_ms: x.DURATION_MICROSEC != null ? Math.round(x.DURATION_MICROSEC / 1000) : null, statement: String(x.STATEMENT_STRING || "").slice(0, 200) };
+    });
+    var top = rows.slice(0, 5).map(function (x) {
+      var dur = x.DURATION_MICROSEC != null ? Math.round(x.DURATION_MICROSEC / 1000) + " ms" : "?";
+      var who = x.DB_USER || "unknown user";
+      var stmt = String(x.STATEMENT_STRING || "").slice(0, 80);
+      return "- **" + dur + "** by **" + esc(who) + "** — `" + esc(stmt) + (stmt.length >= 80 ? "…" : "") + "`";
+    }).join("\n");
+    return jsonBlock(expData) + "\n\n" + "Found **" + rows.length + "** expensive statement(s). Top offenders:\n\n" + top + (rows.length > 5 ? "\n\n_…and " + (rows.length - 5) + " more._" : "");
+  }
+
+  if (r.name === "hana_backup_status") {
+    if (!rows.length) return "⚠️ No backup records found — no recovery path if data is lost.";
+    var rec = rows[0];
+    var when = rec.SYS_START_TIME || rec.START_TIME || "?";
+    var state = rec.STATE || rec.STATE || "?";
+    var backupData = { latest: { start_time: when, state: state, state_code: rec.STATE_CODE || null, entry_type: rec.ENTRY_TYPE || null }, total_records: rows.length, records: rows.slice(0, 5) };
+    return jsonBlock(backupData) + "\n\n" + "Last backup: **" + esc(when) + "** — " + esc(String(state)) + " (" + rows.length + " record(s)).";
+  }
+
+  if (r.name === "hana_replication") {
+    if (!rows.length) return "Replication is not configured on this instance.";
+    var replData = rows.map(function (x) { return { host: x.HOST || null, port: x.PORT || null, replication_status: x.REPLICATION_STATUS || x.STATE || null, operation_mode: x.OPERATION_MODE || null }; });
+    return jsonBlock(replData) + "\n\n" + "Replication is active — **" + rows.length + "** service(s) reporting, lag present.";
+  }
+
+  if (r.name === "hana_trace_files") {
+    if (!rows.length) return "No trace files found.";
+    var traceData = rows.slice(0, 5).map(function (x) {
+      return { file_name: x.FILE_NAME || "unknown", file_size: x.FILE_SIZE != null ? num(x.FILE_SIZE) : null, file_mtime: x.FILE_MTIME || null };
+    });
+    var recent = rows.slice(0, 5).map(function (x) {
+      var size = x.FILE_SIZE != null ? fmtBytes2(num(x.FILE_SIZE)) : "?";
+      return "- **" + esc(x.FILE_NAME || "unknown") + "** (" + size + ")" + (x.FILE_MTIME ? " — " + esc(x.FILE_MTIME) : "");
+    }).join("\n");
+    return jsonBlock(traceData) + "\n\nFound **" + rows.length + "** trace file(s). Most recent:\n\n" + recent + (rows.length > 5 ? "\n\n_…and " + (rows.length - 5) + " more._" : "");
+  }
+
+  if (r.name === "hana_active_statements") {
+    if (!rows.length) return "No statements currently running.";
+    return "**" + rows.length + "** statement(s) currently active.";
+  }
+
+  if (r.name === "hana_table_sizes") {
+    if (!rows.length) return "No table size data returned.";
+    var tblData = rows.slice(0, 10).map(function (x) { return { schema: x.SCHEMA_NAME || "?", table: x.TABLE_NAME || "?", memory_size: x.MEMORY_SIZE_IN_TOTAL != null ? num(x.MEMORY_SIZE_IN_TOTAL) : null, record_count: x.RECORD_COUNT != null ? num(x.RECORD_COUNT) : null }; });
+    var tbls = rows.slice(0, 10).map(function (x) {
+      var size = x.MEMORY_SIZE_IN_TOTAL != null ? fmtBytes2(num(x.MEMORY_SIZE_IN_TOTAL)) : "?";
+      return "- **" + esc(x.SCHEMA_NAME || "?") + "." + esc(x.TABLE_NAME || "?") + "** — " + size;
+    }).join("\n");
+    return jsonBlock(tblData) + "\n\nTop **" + Math.min(rows.length, 10) + "** largest tables by memory:\n\n" + tbls;
+  }
+
+  if (r.name === "hana_metrics" || r.name === "hana_connections") {
+    if (!rows.length) return "No connection data available.";
+  }
+
+  if (r.name === "hana_execute_query") {
+    if (!rows.length) return "The query ran but returned no rows.";
+    var cols = Object.keys(rows[0] || {});
+    if (!cols.length) return "Query returned **" + rows.length + "** row(s) with no columns.";
+    var querySql = (r.res && r.res.sql) || pickedSql || "";
+    var qData = { sql: querySql, row_count: rows.length, columns: cols, rows: rows.slice(0, 15) };
+    var head = "| " + cols.map(esc).join(" | ") + " |\n";
+    head += "| " + cols.map(function() { return "---"; }).join(" | ") + " |\n";
+    var body = rows.slice(0, 15).map(function(row) {
+      return "| " + cols.map(function(c) {
+        var v = row[c] != null ? String(row[c]) : "";
+        return esc(v.length > 60 ? v.slice(0, 57) + "…" : v);
+      }).join(" | ") + " |";
+    }).join("\n");
+    var more = rows.length > 15 ? "\n\n_…and " + (rows.length - 15) + " more._" : "";
+    return "Here's what I found (" + rows.length + " row(s)):\n\n" + jsonBlock(qData) + "\n\n" + head + body + more;
   }
 
   if (rows.length) {
@@ -1259,32 +1500,113 @@ function buildSummary(results) {
       return;
     }
     if (r.name === "hana_expensive_statements") {
-      if (!rows.length) { lines.push("No expensive statements recorded recently."); return; }
-      lines.push("Found **" + rows.length + "** expensive statement(s).");
+      if (!rows.length) { lines.push("✅ No expensive statements recorded recently — query performance looks good."); return; }
+      lines.push("Found **" + rows.length + "** expensive statement(s). Top offenders:");
+      rows.slice(0, 5).forEach(function (x) {
+        var dur = x.DURATION_MICROSEC != null ? Math.round(x.DURATION_MICROSEC / 1000) + " ms" : "?";
+        var who = x.DB_USER || "unknown user";
+        var stmt = String(x.STATEMENT_STRING || "").slice(0, 80);
+        lines.push("- **" + dur + "** by **" + esc(who) + "** — `" + esc(stmt) + (stmt.length >= 80 ? "…" : "") + "`");
+      });
+      if (rows.length > 5) lines.push("\n…and " + (rows.length - 5) + " more.");
       return;
     }
     if (r.name === "hana_trace_files") {
-      lines.push("Found **" + rows.length + "** trace file(s).");
+      if (!rows.length) { lines.push("No trace files found."); return; }
+      lines.push("Found **" + rows.length + "** trace file(s). Most recent:");
+      rows.slice(0, 5).forEach(function (x) {
+        var size = x.FILE_SIZE != null ? fmtBytes2(num(x.FILE_SIZE)) : "?";
+        var name = x.FILE_NAME || "unknown";
+        var when = x.FILE_MTIME || "";
+        lines.push("- **" + esc(name) + "** (" + size + ")" + (when ? " — " + esc(when) : ""));
+      });
+      if (rows.length > 5) lines.push("\n…and " + (rows.length - 5) + " more.");
+      return;
+    }
+    if (r.name === "hana_blocked_transactions") {
+      if (!rows.length) { lines.push("✅ No blocked transactions — everything is flowing smoothly."); return; }
+      lines.push("⚠️ **" + rows.length + " blocked transaction(s)** found.");
+      rows.slice(0, 5).forEach(function (x) {
+        var blocker = x.BLOCKING_TRANSACTION_NAME || x.BLOCKING_CONNECTION_ID || "unknown";
+        var blocked = x.TRANSACTION_NAME || x.CONNECTION_ID || "unknown";
+        lines.push("- Transaction **" + esc(blocked) + "** is waiting on **" + esc(blocker) + "**");
+      });
+      if (rows.length > 5) lines.push("\n…and " + (rows.length - 5) + " more blocked.");
       return;
     }
     if (r.name === "hana_execute_query") {
-      lines.push("Query returned **" + (r.rc || rows.length) + "** row(s).");
+      if (!rows.length) { lines.push("Query ran successfully but returned no rows."); return; }
+      var cols = Object.keys(rows[0] || {});
+      lines.push("**" + (r.rc || rows.length) + " row(s)** returned.");
+      var preview = rows.slice(0, 10);
+      preview.forEach(function (row) {
+        var parts = cols.slice(0, 3).map(function (c) {
+          var v = row[c] != null ? String(row[c]) : "";
+          if (v.length > 60) v = v.slice(0, 57) + "…";
+          return v;
+        });
+        lines.push("- " + parts.join(" · "));
+      });
+      if (rows.length > 10) lines.push("\n_…and " + (rows.length - 10) + " more._");
       return;
     }
-    if (r.name === "hana_discover_monitoring_views") {
-      if (!rows.length) { lines.push("No monitoring (M_*) views were found in this instance."); return; }
-      var groups = groupViews(rows);
-      lines.push("Found **" + rows.length + "** monitoring views across **" + groups.length + "** categories.");
+    if (r.name === "hana_backup_status") {
+      if (!rows.length) { lines.push("⚠️ No backup records found. This is a risk: no recovery path if data is lost."); return; }
+      lines.push("Found **" + rows.length + "** backup record(s).");
+      rows.slice(0, 3).forEach(function (x) {
+        var when = x.SYS_START_TIME || x.START_TIME || "?";
+        var state = x.STATE || x.STATUS || "?";
+        lines.push("- **" + esc(when) + "** — " + esc(String(state)));
+      });
+      return;
+    }
+    if (r.name === "hana_services") {
+      if (!rows.length) { lines.push("No service rows returned."); return; }
+      var active = rows.filter(function (s) { return s.ACTIVE_STATUS === "YES" || s.ACTIVE_STATUS === "ACTIVE"; });
+      var down = rows.length - active.length;
+      if (down === 0) lines.push("✅ All **" + rows.length + "** services are active.");
+      else lines.push("⚠️ " + active.length + "/" + rows.length + " services active — " + down + " down.");
+      return;
+    }
+    if (r.name === "hana_replication") {
+      if (!rows.length) { lines.push("Replication is not configured on this instance."); return; }
+      lines.push("Replication is active — **" + rows.length + "** service(s) reporting.");
+      return;
+    }
+    if (r.name === "hana_active_statements") {
+      if (!rows.length) { lines.push("No statements currently running."); return; }
+      lines.push("**" + rows.length + "** statement(s) currently active.");
+      return;
+    }
+    if (r.name === "hana_table_sizes") {
+      if (!rows.length) { lines.push("No table size data returned."); return; }
+      lines.push("Top **" + Math.min(rows.length, 10) + "** largest tables by memory:");
+      rows.slice(0, 10).forEach(function (x) {
+        var size = x.MEMORY_SIZE_IN_TOTAL != null ? fmtBytes2(num(x.MEMORY_SIZE_IN_TOTAL)) : "?";
+        lines.push("- **" + esc(x.SCHEMA_NAME || "?") + "." + esc(x.TABLE_NAME || "?") + "** — " + size);
+      });
       return;
     }
     if (r.name === "hana_search_views") {
       lines.push(rows.length
-        ? "Found **" + rows.length + "** matching view(s)."
+        ? "Found **" + rows.length + "** matching view(s):\n\n" + rows.slice(0, 15).map(function (x) {
+          return "- **" + (x.VIEW_NAME || x.OBJECT_NAME || "?") + "**" + (x.SCHEMA_NAME ? " (" + x.SCHEMA_NAME + ")" : "");
+        }).join("\n") + (rows.length > 15 ? "\n\n…and " + (rows.length - 15) + " more." : "") + "\n"
         : "No views matched that search.");
       return;
     }
     if (rows.length) {
-      lines.push("**" + esc(r.name) + "** returned **" + r.rc + "** row(s).");
+      var cols = Object.keys(rows[0] || {});
+      lines.push("**" + rows.length + "** result" + (rows.length === 1 ? "" : "s") + " from **" + esc(r.name) + "**.");
+      rows.slice(0, 8).forEach(function (row) {
+        var parts = cols.slice(0, 3).map(function (c) {
+          var v = row[c] != null ? String(row[c]) : "";
+          if (v.length > 60) v = v.slice(0, 57) + "…";
+          return v;
+        });
+        lines.push("- " + parts.join(" · "));
+      });
+      if (rows.length > 8) lines.push("\n_…and " + (rows.length - 8) + " more._");
     } else {
       lines.push("**" + esc(r.name) + "**: no rows returned.");
     }
@@ -1356,6 +1678,7 @@ function renderResultGrids(results, container) {
       cols.forEach(function (c) {
         var td = document.createElement("td");
         var cellVal = row[c] != null ? String(row[c]) : "";
+        td.dataset.label = c;
         td.textContent = cellVal;
         td.title = cellVal;
         td.dataset.value = cellVal;
@@ -1520,6 +1843,9 @@ function chooseSteps(text) {
 
 /* ---------- open a conversation ---------- */
 function openConv(id) {
+  abortActiveStream();
+  clearAttachment();
+  pickedSql = null;
   var conv = getConv(id);
   if (!conv) return;
   currentConvId = id;
@@ -1650,6 +1976,9 @@ document.addEventListener("click", function (e) {
 (function initView() {
   var last = "dashboard";
   try { last = localStorage.getItem(LAST_VIEW_KEY) || "dashboard"; } catch (e) { }
+  /* A #view in the URL (deep link) wins over the remembered view. */
+  var fromHash = viewFromHash();
+  if (fromHash) last = fromHash;
   if (VIEWS.indexOf(last) < 0) last = "dashboard";
   show(last);
 })();

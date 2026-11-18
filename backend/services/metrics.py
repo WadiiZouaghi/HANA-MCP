@@ -4,6 +4,22 @@ from backend import _pathsetup  # noqa: F401 (ensures project root is on sys.pat
 from engine import query_rows
 
 
+def _fmt_bytes(value):
+    """Format a byte value as human-readable (B/KB/MB/GB/TB)."""
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if n <= 0:
+        return "0 B"
+    units = ["B", "KB", "MB", "GB", "TB"]
+    idx = 0
+    while n >= 1024 and idx < len(units) - 1:
+        n /= 1024.0
+        idx += 1
+    return f"{n:.1f} {units[idx]}"
+
+
 def get_memory_metrics():
     query = """
     SELECT
@@ -56,44 +72,43 @@ def get_hana_memory() -> dict[str, Any]:
     else:
         pressure = "NORMAL"
 
+    # Return in standard format with rows for frontend compatibility
+    # Also include structured data for detailed access
+    summary_rows = [
+        {"metric": "System Total", "value": _fmt_bytes(system_total)},
+        {"metric": "System Free", "value": _fmt_bytes(system_free)},
+        {"metric": "HANA Used", "value": _fmt_bytes(hana_used)},
+        {"metric": "HANA Used %", "value": f"{usage_percent:.1f}%"},
+        {"metric": "Process Memory", "value": _fmt_bytes(process_memory)},
+        {"metric": "Process Resident", "value": _fmt_bytes(process_resident)},
+        {"metric": "Heap Allocated", "value": _fmt_bytes(heap_allocated)},
+        {"metric": "Heap Used", "value": _fmt_bytes(heap_used)},
+        {"metric": "Heap Used %", "value": f"{heap_usage_percent:.1f}%"},
+        {"metric": "Shared Allocated", "value": _fmt_bytes(shared_allocated)},
+        {"metric": "Shared Used", "value": _fmt_bytes(shared_used)},
+        {"metric": "Shared Used %", "value": f"{shared_usage_percent:.1f}%"},
+        {"metric": "Global Limit", "value": _fmt_bytes(global_limit)},
+        {"metric": "Effective Limit", "value": _fmt_bytes(effective_limit)},
+        {"metric": "Limit Used %", "value": f"{limit_usage_percent:.1f}%"},
+        {"metric": "Memory Pressure", "value": pressure},
+    ]
+
     return {
-        "system": {
-            "total_bytes": system_total,
-            "free_bytes": system_free,
-        },
-        "hana": {
-            "memory_in_use_bytes": hana_used,
-            "memory_in_use_percent": usage_percent,
-        },
-        "process": {
-            "memory_bytes": process_memory,
-            "resident_bytes": process_resident,
-        },
-        "heap": {
-            "allocated_bytes": heap_allocated,
-            "used_bytes": heap_used,
-            "free_bytes": heap_free,
-            "usage_percent": heap_usage_percent,
-        },
-        "shared": {
-            "allocated_bytes": shared_allocated,
-            "used_bytes": shared_used,
-            "free_bytes": shared_free,
-            "usage_percent": shared_usage_percent,
-        },
-        "limits": {
-            "global_allocation_limit_bytes": global_limit,
-            "effective_process_allocation_limit_bytes": effective_limit,
-            "process_allocation_limit_bytes": process_allocation_limit,
-            "limit_usage_percent": limit_usage_percent,
-        },
-        "compactors": {
-            "size_bytes": compactors_size,
-            "freeable_bytes": compactors_freeable,
-        },
-        "memory_pressure": pressure,
-        "action_required": pressure in ("WARNING", "CRITICAL"),
-        "raw_rows": rows,
+        "rows": summary_rows,
+        "row_count": len(summary_rows),
+        "execution_ms": 0,
+        "structured": {
+            "system": {"total_bytes": system_total, "free_bytes": system_free},
+            "hana": {"memory_in_use_bytes": hana_used, "memory_in_use_percent": usage_percent},
+            "process": {"memory_bytes": process_memory, "resident_bytes": process_resident},
+            "heap": {"allocated_bytes": heap_allocated, "used_bytes": heap_used, "free_bytes": heap_free, "usage_percent": heap_usage_percent},
+            "shared": {"allocated_bytes": shared_allocated, "used_bytes": shared_used, "free_bytes": shared_free, "usage_percent": shared_usage_percent},
+            "limits": {"global_allocation_limit_bytes": global_limit, "effective_process_allocation_limit_bytes": effective_limit, "process_allocation_limit_bytes": process_allocation_limit, "limit_usage_percent": limit_usage_percent},
+            "compactors": {"size_bytes": compactors_size, "freeable_bytes": compactors_freeable},
+            "memory_pressure": pressure,
+            "action_required": pressure in ("WARNING", "CRITICAL"),
+            "raw_rows": rows,
+        }
     }
 
 
@@ -102,6 +117,8 @@ def get_connections_metrics():
     SELECT
         COUNT(*) AS CONNECTIONS
     FROM SYS.M_CONNECTIONS
+    WHERE CONNECTION_ID > 0
+      AND CONNECTION_STATUS IN ('RUNNING', 'IDLE', 'QUEUING')
     """
     return query_rows(query)
 

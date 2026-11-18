@@ -67,16 +67,23 @@ monitoring:
       FROM SYS.M_DATABASE
 
   services:
-    description: "Active HANA services and their ports"
+    description: "Active HANA services and their ports. Optional: filter by SERVICE_NAME (e.g. 'indexserver' or 'indexserver,daemon' for multiple)"
     category: "Resources"
     icon: "services"
     severity: "info"
+    inputs:
+      - name: "service_name"
+        type: "str"
+        description: "Filter by service name(s) (e.g. 'indexserver' or 'indexserver,daemon' for multiple). Empty = all services."
+        default: ""
     query: |
       SELECT
         SERVICE_NAME,
         HOST,
         PORT,
-        ACTIVE_STATUS
+        ACTIVE_STATUS,
+        SQL_PORT,
+        COORDINATOR_TYPE
       FROM SYS.M_SERVICES
       ORDER BY SERVICE_NAME, PORT
 
@@ -122,6 +129,8 @@ monitoring:
       SELECT
         COUNT(*) AS CONNECTIONS
       FROM SYS.M_CONNECTIONS
+      WHERE CONNECTION_ID > 0
+        AND CONNECTION_STATUS IN ('RUNNING', 'IDLE', 'QUEUING')
 
   replication:
     description: "System replication status"
@@ -167,10 +176,12 @@ monitoring:
     query: |
       SELECT
         CONNECTION_ID,
-        USER_NAME,
-        STATEMENT_TYPE,
+        STATEMENT_STATUS,
+        LAST_EXECUTED_TIME,
+        EXECUTION_COUNT,
         STATEMENT_STRING
       FROM SYS.M_ACTIVE_STATEMENTS
+      WHERE STATEMENT_STATUS = 'ACTIVE'
 
   blocked_transactions:
     description: "Blocked transactions / lock waits"
@@ -240,8 +251,8 @@ llm:
   provider: openai
   base_url: http://172.17.64.1:11434/v1
   model: llama3.1:8b
-  temperature: 0.2     
-  top_p: 0.85              
-  max_tokens: 600
-  max_tool_rounds: 2       
-  request_timeout: 120
+  temperature: 0.1   
+  top_p: 0.8         
+  max_tokens: 1000
+  max_tool_rounds: 5
+  request_timeout: 180

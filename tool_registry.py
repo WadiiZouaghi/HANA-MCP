@@ -5,12 +5,15 @@ ENHANCED: Better descriptions, clear "when to use", less vague purpose text.
 The LLM now sees exactly when to pick each tool.
 """
 
+import inspect
+
 from backend.services.metrics import get_hana_memory
 from engine import execute_query
 from hana_health import hana_health_check
 from monitoring import (
     execute_monitoring_tool,
     load_monitoring_config,
+    monitoring_tool_inputs,
     monitoring_tool_metadata,
 )
 from sap.sap_tools import (
@@ -33,13 +36,55 @@ from trends import (
 # =====================================================
 
 
-def create_monitoring_function(tool_name):
-    """Build a no-argument callable that executes a configured monitoring tool."""
+def _type_from_str(type_str: str):
+    """Convert string type to Python type for annotations."""
+    mapping = {
+        "str": str,
+        "string": str,
+        "int": int,
+        "integer": int,
+        "float": float,
+        "number": float,
+        "bool": bool,
+        "boolean": bool,
+        "list": list,
+        "array": list,
+        "dict": dict,
+        "object": dict,
+    }
+    return mapping.get((type_str or "str").lower(), str)
 
-    def monitoring_function():
-        return execute_monitoring_tool(tool_name)
+
+def create_monitoring_function(tool_name):
+    """Build a callable that executes a configured monitoring tool with explicit parameters."""
+    tool_config = load_monitoring_config().get(tool_name, {})
+    inputs = tool_config.get("inputs", [])
+
+    # Build function signature dynamically
+    params = []
+    annotations = {"return": dict}
+
+    for inp in inputs:
+        param_name = inp.get("name")
+        param_type = _type_from_str(inp.get("type", "str"))
+        default = inp.get("default", inspect.Parameter.empty)
+        if default == "":
+            default = ""
+        annotations[param_name] = param_type
+        if default is inspect.Parameter.empty:
+            params.append(inspect.Parameter(param_name, inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=param_type))
+        else:
+            params.append(inspect.Parameter(param_name, inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=param_type, default=default))
+
+    sig = inspect.Signature(params, return_annotation=dict)
+
+    def monitoring_function(*args, **kwargs):
+        bound = sig.bind(*args, **kwargs)
+        return execute_monitoring_tool(tool_name, **bound.arguments)
 
     monitoring_function.__name__ = f"hana_{tool_name}"
+    monitoring_function.__signature__ = sig
+    monitoring_function.__annotations__ = annotations
     return monitoring_function
 
 
@@ -156,7 +201,7 @@ for name in monitoring_tools:
         category="Monitoring",
         description=metadata["description"],
         purpose=purpose,
-        inputs=[],
+        inputs=monitoring_tool_inputs(name),
         output="Rows from the configured monitoring query with row_count and execution_ms.",
         example=f"Call hana_{name}() to inspect current {name.replace('_', ' ')}.",
     )

@@ -1,175 +1,170 @@
-/* ---------- DASHBOARD ---------- */
-function updateDashBanner(dash, online) {
-  var icon = $("dash-banner-icon");
-  var title = $("dash-banner-title");
-  var sub = $("dash-banner-sub");
-  if (!icon || !title || !sub) return;
-  var mem = (dash.metrics && dash.metrics.memory) || {};
-  var cpu = (dash.metrics && dash.metrics.cpu) || {};
-  var alerts = dash.alerts || {};
-  var health = dash.health || {};
-  var services = health.services || {};
-  var backup = health.backup || {};
-  var replication = health.replication || {};
-  var backupState = String(backup.status || backup.state || "").toUpperCase();
-  var replicationState = String(replication.status || replication.state || "").toUpperCase();
-  var serviceState = String(services.state || "").toUpperCase();
-  var locks = alerts.locks && alerts.locks.count;
-  var crit = mem.usage_percent >= 85 || cpu.usage_percent >= 80 || serviceState === "CRITICAL" || Number(services.offline || 0) > 0 || backupState === "FAILED" || replicationState === "ERROR";
-  var warn = mem.usage_percent >= 70 || cpu.usage_percent >= 60 || locks || (backupState && backupState !== "OK") || replicationState === "NOT CONFIGURED";
-  var focus = [];
+/* ---------- OVERVIEW ---------- */
+function overviewActive() {
+  var view = $("view-dashboard");
+  return !!view && view.classList.contains("active");
+}
 
-  if (!online) {
-    icon.className = "dash-banner__icon crit";
-    icon.textContent = "✕";
-    title.textContent = "System offline or unreachable";
-    sub.textContent = "Cannot connect to SAP HANA — check network and credentials.";
-    return;
+function setKpi(id, value, sub, tone) {
+  var val = $("kpi-" + id + "-val");
+  var subEl = $("kpi-" + id + "-sub");
+  var dot = $("kpi-" + id + "-dot");
+  if (val) {
+    val.textContent = value === null || value === undefined ? "—" : value;
+    val.className = "kpi__value" + (value === null || value === undefined ? " is-unavailable" : "");
   }
-
-  if (crit) {
-    icon.className = "dash-banner__icon crit";
-    icon.textContent = "!";
-    title.textContent = Number(services.offline || 0) > 0 ? "Operational issues detected" : "Critical thresholds exceeded";
-    if (mem.usage_percent >= 85) focus.push("memory usage is critical");
-    if (cpu.usage_percent >= 80) focus.push("CPU usage is critical");
-    if (serviceState === "CRITICAL" || Number(services.offline || 0) > 0) focus.push((Number(services.offline || 0) || 1) + " service" + ((Number(services.offline || 0) || 1) === 1 ? " is" : "s are") + " offline");
-    if (backupState === "FAILED") focus.push("backup failed");
-    if (replicationState === "ERROR") focus.push("replication error");
-    sub.textContent = focus.length ? ("Review " + focus.slice(0, 3).join(" · ") + " before routine operations continue.") : "Review the flagged domains below before routine operations continue.";
-  } else if (warn) {
-    icon.className = "dash-banner__icon warn";
-    icon.textContent = "⚠";
-    title.textContent = "Review operational warnings";
-    if (mem.usage_percent >= 70) focus.push("memory usage is elevated");
-    if (cpu.usage_percent >= 60) focus.push("CPU usage is elevated");
-    if (locks) focus.push(locks + " blocked transaction" + (Number(locks) === 1 ? "" : "s"));
-    if (backupState === "NO BACKUP FOUND") focus.push("no backup detected");
-    else if (backupState === "NOT CONFIGURED") focus.push("backups not configured");
-    if (replicationState === "NOT CONFIGURED") focus.push("replication not configured");
-    sub.textContent = focus.length ? ("Review " + focus.slice(0, 3).join(" · ") + " before routine operations continue.") : "Some domains deserve attention before routine operations continue.";
-  } else {
-    icon.className = "dash-banner__icon ok";
-    icon.textContent = "✓";
-    title.textContent = "All systems operational";
-    var sys = dash.system || {};
-    sub.textContent = (sys.database || "SAP HANA") + " on " + (sys.host || "instance") + " is healthy.";
-  }
+  if (subEl) subEl.textContent = sub || "";
+  if (dot) dot.className = "status-dot " + ({ success: "online", warning: "reconnect", critical: "error" }[tone] || "");
 }
 
 function renderServicesTable(svc) {
   var body = $("svc-body");
-  if (!Array.isArray(svc) || !svc.length) {
-    body.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--muted)">No services data</td></tr>';
+  if (!Array.isArray(svc)) {
+    body.innerHTML = '<tr><td colspan="4" class="table-empty">Service information is unavailable' +
+      (svc && svc.error ? ": " + esc(svc.error) : ".") + "</td></tr>";
+    return;
+  }
+  if (!svc.length) {
+    body.innerHTML = '<tr><td colspan="4" class="table-empty">No services were reported.</td></tr>';
     return;
   }
   body.innerHTML = svc.map(function (s) {
-    return "<tr><td class=\"svc-name\">" + esc(s.SERVICE_NAME || s.NAME || "—") + "</td>" +
-      "<td>" + svcStatusPill(s.ACTIVE_STATUS || s.STATUS) + "</td>" +
-      '<td class="mono">' + esc(s.PORT != null ? s.PORT : "—") + "</td></tr>";
+    return '<tr><td class="mono">' + esc(s.SERVICE_NAME || s.NAME || "—") + "</td>" +
+      '<td class="mono">' + esc(s.HOST != null ? s.HOST : "—") + "</td>" +
+      '<td class="mono">' + esc(s.PORT != null ? s.PORT : "—") + "</td>" +
+      "<td>" + svcStatusPill(s.ACTIVE_STATUS || s.STATUS) + "</td></tr>";
   }).join("");
 }
 
-function loadDashboard() {
-  var pill = $("dash-status");
+function renderActivity(el, payload) {
+  if (!el) return;
+  if (!payload || payload.error) {
+    setState(el, "error", "Activity is unavailable.", payload && payload.error);
+    return;
+  }
+  var items = payload.executions || [];
+  if (!items.length) {
+    setState(el, "empty", "No tool executions recorded yet.", "Activity appears here when the assistant, the console or a page runs an MCP tool.");
+    return;
+  }
+  el.innerHTML = items.slice(0, 8).map(function (item) {
+    var ok = item.status === "success";
+    return '<div class="activity__item">' +
+      '<span class="activity__icon activity__icon--' + (ok ? "success" : "critical") + '">' + icon(ok ? "check-circle" : "x-circle") + "</span>" +
+      '<div class="activity__body"><div class="activity__title mono">' + esc(item.tool) + "</div>" +
+      '<div class="activity__meta">' + esc(ok ? "Completed" : "Failed") + " · " + esc(item.source) + " · " + esc(fmtDuration(item.duration_ms)) + "</div></div>" +
+      '<span class="activity__time mono" title="' + escAttr(item.timestamp) + '">' + esc(fmtAgo(item.timestamp)) + "</span></div>";
+  }).join("");
+}
+
+/* Summarises the alerts loaded by the Alerts page (monitor + HANA statistics). */
+function renderOverviewAlerts() {
+  var area = $("alerts-area");
+  if (!area || area.querySelector(".banner--critical[data-fatal]")) return;
+  var items = (typeof ALERTS !== "undefined" && ALERTS.items) || [];
+  var active = items.filter(function (a) { return !a.acknowledged_at && a.severity !== "info"; });
+  if (!active.length) { area.innerHTML = ""; return; }
+  var critical = active.some(function (a) { return a.severity === "critical"; });
+  area.innerHTML = '<div class="banner banner--' + (critical ? "critical" : "warning") + '">' +
+    '<span class="banner__icon">' + icon("alert-triangle") + "</span><span>" +
+    esc(active.length + " active alert" + (active.length === 1 ? "" : "s") + ": " +
+      active.slice(0, 3).map(function (a) { return a.title; }).join(" · ") + (active.length > 3 ? " …" : "")) +
+    '</span><a class="link" href="#" data-goto="alerts">Review alerts</a></div>';
+}
+
+function loadDashboard(force) {
+  /* Called on a timer as well: only refresh while the overview is visible. */
+  if (force !== true && !overviewActive()) return;
 
   Promise.all([
     api("/api/dashboard"),
-    api("/api/history?minutes=60")
+    api("/api/history?minutes=60"),
+    api("/api/alerts/locks"),
+    api("/api/executions?limit=8")
   ]).then(function (results) {
-    var dash = results[0];
-    var history = results[1];
+    var dash = results[0], history = results[1], locks = results[2], activity = results[3];
     if (dash.error) throw new Error(dash.error);
 
     var sys = dash.system || {};
     var online = sys.status === "ONLINE";
-    updateTopbar(sys);
-    setStatus(online);
-    if (pill) pill.classList.add(online ? "online" : "error");
-    updateDashBanner(dash, online);
+    setStatus(online, online ? sys : null);
 
+    /* Database status */
+    if (online) {
+      setKpi("db", "Online", (sys.database || "Database") + (sys.host ? " · " + sys.host : ""), "success");
+    } else {
+      setKpi("db", "Offline", sys.error ? String(sys.error).slice(0, 80) : "Database is not reachable", "critical");
+    }
+
+    /* Services */
+    var svc = dash.health && dash.health.services;
+    if (Array.isArray(svc) && svc.length) {
+      var up = svc.filter(function (s) { return String(s.ACTIVE_STATUS || "").toUpperCase() === "YES"; }).length;
+      setKpi("svc", up + " / " + svc.length, up === svc.length ? "All services active" : (svc.length - up) + " not active", up === svc.length ? "success" : "critical");
+    } else {
+      setKpi("svc", null, "Unavailable", "");
+    }
+    renderServicesTable(svc);
+
+    /* Memory — a zero total means the metric could not be read, not 0% used. */
     var m = dash.metrics || {};
     var mem = m.memory || {};
-    var cpu = m.cpu || {};
-    var conn = m.connections || {};
-    var diskRaw = m.disk;
-    var diskRows = Array.isArray(diskRaw) ? diskRaw : (diskRaw && diskRaw.rows) || [];
-    var diskPct = calcDiskPct(diskRows);
-
-    var memPct = mem.usage_percent || 0;
-    var cpuPct = cpu.usage_percent || 0;
-    var memCls = kpiClass(memPct);
-    var cpuCls = kpiClass(cpuPct);
-    $("kpi-mem-val").textContent = pct(memPct);
-    $("kpi-mem-val").className = "kpi-card__value " + memCls;
-    $("kpi-memory").className = "kpi-card is-" + memCls;
-    $("kpi-cpu-val").textContent = pct(cpuPct);
-    $("kpi-cpu-val").className = "kpi-card__value " + cpuCls;
-    $("kpi-cpu").className = "kpi-card is-" + cpuCls;
-    $("kpi-conn-val").textContent = conn.active != null ? conn.active : "—";
-    $("kpi-conn-val").className = "kpi-card__value";
-    $("kpi-conn").className = "kpi-card";
-    if (diskPct != null) {
-      var diskCls = kpiClass(diskPct);
-      $("kpi-disk-val").textContent = pct(diskPct);
-      $("kpi-disk-val").className = "kpi-card__value " + diskCls;
-      $("kpi-disk").className = "kpi-card is-" + diskCls;
+    var bar = $("kpi-mem-bar");
+    if (online && mem.total_bytes) {
+      setKpi("mem", Number(mem.usage_percent).toFixed(1) + "%", fmtBytes(mem.used_bytes) + " used of " + fmtBytes(mem.total_bytes));
+      bar.style.width = Math.max(0, Math.min(100, mem.usage_percent)) + "%";
+      bar.className = "meter__fill is-" + kpiClass(mem.usage_percent);
+      $("ov-mem-now").textContent = Number(mem.usage_percent).toFixed(1) + "%";
     } else {
-      $("kpi-disk-val").textContent = "—";
-      $("kpi-disk-val").className = "kpi-card__value";
-      $("kpi-disk").className = "kpi-card";
+      setKpi("mem", null, "Unavailable");
+      bar.style.width = "0";
+      $("ov-mem-now").textContent = "—";
     }
 
+    /* Connections */
     var points = (history && history.points) || [];
-    if (points.length >= 2) {
-      renderSparkline($("kpi-mem-spark"), points.map(function (p) { return p.memory_usage; }), gaugeColor(memPct));
-      renderSparkline($("kpi-cpu-spark"), points.map(function (p) { return p.cpu_usage; }), gaugeColor(cpuPct));
-      renderSparkline($("kpi-conn-spark"), points.map(function (p) { return p.connections; }), "var(--cyan)");
-      renderSparkline($("kpi-disk-spark"), [], "var(--primary)");
-      var prev = points[points.length - 2];
-      var curr = points[points.length - 1];
-      setKpiDelta("kpi-mem-delta", fmtDelta(curr.memory_usage, prev.memory_usage));
-      setKpiDelta("kpi-cpu-delta", fmtDelta(curr.cpu_usage, prev.cpu_usage));
-      var connDelta = curr.connections - prev.connections;
-      $("kpi-conn-delta").textContent = connDelta === 0 ? "No change" : (connDelta > 0 ? "+" : "") + connDelta + " vs prior";
-      $("kpi-conn-delta").className = "kpi-card__delta " + (connDelta > 0 ? "up" : connDelta < 0 ? "down" : "neutral");
-    }
-    if (diskPct != null) {
-      $("kpi-disk-delta").textContent = "Current snapshot";
-      $("kpi-disk-delta").className = "kpi-card__delta neutral";
+    var conn = m.connections || {};
+    if (online && conn.active != null) {
+      var sub = "Open right now";
+      var past = points.map(function (p) { return p.connections; }).filter(function (v) { return v != null; });
+      if (past.length >= 2) {
+        var avg = past.reduce(function (a, b) { return a + b; }, 0) / past.length;
+        sub = "Avg " + avg.toFixed(1) + " over the last hour";
+      }
+      setKpi("conn", fmtNumber(conn.active), sub);
+      $("ov-conn-now").textContent = fmtNumber(conn.active);
+    } else {
+      setKpi("conn", null, "Unavailable");
+      $("ov-conn-now").textContent = "—";
     }
 
-    renderGauge($("gauge-memory"), memPct, $("gauge-mem-label"));
-    renderGauge($("gauge-cpu"), cpuPct, $("gauge-cpu-label"));
-    renderServicesTable(dash.health && dash.health.services);
-    renderAlerts(dash.alerts || {}, mem, cpu);
+    /* Blocked transactions (thresholds match the backend alert rules) */
+    if (locks && locks.count != null && !locks.error) {
+      var n = Number(locks.count);
+      setKpi("locks", fmtNumber(n), n === 0 ? "No lock waits" : n + " transaction" + (n === 1 ? "" : "s") + " waiting", n === 0 ? "success" : n >= 5 ? "critical" : "warning");
+    } else {
+      setKpi("locks", null, "Unavailable", "");
+    }
+
+    /* Charts use only recorded snapshots */
+    lineChart($("ov-chart-memory"), historySeries(points, "memory_usage"), { color: "--color-accent", unit: "%", decimals: 1 });
+    lineChart($("ov-chart-connections"), historySeries(points, "connections"), { color: "--color-cyan" });
+
+    $("alerts-area").innerHTML = "";
+    if (typeof loadAlerts === "function") loadAlerts(true);
+    renderActivity($("ov-activity"), activity);
+    markUpdated();
   }).catch(function (e) {
-    if (pill) pill.classList.add("error");
     setStatus(false);
-    updateTopbar({});
-    $("alerts-area").innerHTML = '<div class="alert-banner alert-banner--crit"><span class="ab-dot"></span>Dashboard unavailable: ' + esc(e.message) + "</div>";
+    ["db", "svc", "mem", "conn", "locks"].forEach(function (id) { setKpi(id, null, "Unavailable", ""); });
+    $("kpi-mem-bar").style.width = "0";
+    renderServicesTable({ error: e.message });
+    setState($("ov-chart-memory"), "error", "Chart unavailable.");
+    setState($("ov-chart-connections"), "error", "Chart unavailable.");
+    $("alerts-area").innerHTML = '<div class="banner banner--critical" data-fatal="1"><span class="banner__icon">' + icon("x-circle") +
+      "</span><span>Overview unavailable: " + esc(e.message) + "</span></div>";
   });
 }
-
-/* Alerts render as banner only when active; otherwise calm recessed strip */
-function renderAlerts(alerts, mem, cpu) {
-  var list = [];
-  if (mem.usage_percent >= 85) list.push({ sev: "crit", text: "Memory usage " + pct(mem.usage_percent) + " — critical threshold exceeded." });
-  else if (mem.usage_percent >= 70) list.push({ sev: "warn", text: "Memory usage " + pct(mem.usage_percent) + " — elevated." });
-  if (cpu.usage_percent >= 80) list.push({ sev: "crit", text: "CPU usage " + pct(cpu.usage_percent) + " — critical threshold exceeded." });
-  else if (cpu.usage_percent >= 60) list.push({ sev: "warn", text: "CPU usage " + pct(cpu.usage_percent) + " — elevated." });
-  if (alerts.locks && alerts.locks.count) list.push({ sev: "warn", text: alerts.locks.count + " blocked transaction(s)." });
-  if (Array.isArray(alerts.expensive_queries) && alerts.expensive_queries.length) list.push({ sev: "warn", text: alerts.expensive_queries.length + " expensive query(ies)." });
-
-  var area = $("alerts-area");
-  if (!list.length) {
-    area.innerHTML = '<div class="alert-calm"><span class="alert-calm__dot"></span>No active alerts · all monitored thresholds within normal range.</div>';
-    return;
-  }
-  area.innerHTML = list.map(function (a) {
-    return '<div class="alert-banner alert-banner--' + a.sev + '"><span class="ab-dot"></span>' + esc(a.text) + "</div>";
-  }).join("");
-}
+PAGE_LOADERS.dashboard = function () { loadDashboard(true); };
 
 /* ---------- COMPOSITE HEALTH CHECK ---------- */
 function healthVisualState(state) {
@@ -464,11 +459,7 @@ function runHealthCheck() {
   button.classList.add("is-loading");
   button.innerHTML = '<span class="health-card__run-icon" aria-hidden="true">↻</span> Checking';
   setHealthLoading();
-  api("/api/tool/hana_health_check", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: "{}"
-  }).then(function (result) {
+  runTool("hana_health_check", {}, "overview").then(function (result) {
     if (!result || result.error) throw new Error((result && result.error) || "The health tool returned no result.");
     LAST_HEALTH_RESULT = result;
     renderHealthCheck(result);
@@ -561,6 +552,3 @@ if (healthReportBackdrop) healthReportBackdrop.addEventListener("click", closeHe
 document.addEventListener("keydown", function (event) {
   if (event.key === "Escape") closeHealthReport();
 });
-
-/* Initial load so the status pill moves off "Checking…" on first paint */
-loadDashboard();

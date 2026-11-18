@@ -312,7 +312,7 @@ $("sql-run").addEventListener("click", function () {
   SQL_SORT_DIR = 1;
   api("/api/tool/hana_execute_query", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-Source": "console" },
     body: JSON.stringify({ sql: sql })
   }).then(function (res) {
     if (res.error) {
